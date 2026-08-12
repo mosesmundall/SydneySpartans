@@ -3,13 +3,16 @@ import Papa from "papaparse";
 
 /* ===================== GROUPS & DISPLAY ===================== */
 /*
- * Ranking eligibility hierarchy, LOWEST -> HIGHEST:
- * Women -> Youth -> u70kg -> u80kg -> u90kg -> u100kg -> 100kg+
- *
- * A player may hold ranks in their base group and every group ABOVE it.
- * They may never hold/take a rank below their base group.
+ * Ranking structure:
+ * - Women and Youth are separate special categories.
+ * - Women do NOT qualify for Youth.
+ * - Youth do NOT qualify for Women.
+ * - Both special categories qualify for every Open weight class.
+ * - Open competitors qualify for their own class and every heavier Open class.
  */
-const ORDER_GROUPS = ["u60kg", "youth", "u70kg", "u80kg", "u90kg", "u100kg", "100kg+"];
+const OPEN_GROUPS = ["u70kg", "u80kg", "u90kg", "u100kg", "100kg+"];
+const SPECIAL_GROUPS = ["u60kg", "youth"]; // u60kg is the internal key for Women
+const ORDER_GROUPS = [...SPECIAL_GROUPS, ...OPEN_GROUPS];
 const ARMS = ["Right", "Left"];
 
 /**
@@ -158,13 +161,12 @@ function parseInjury(val) {
 /*
  * Treat "women" as the internal "u60kg" ladder key.
  *
- * Because ORDER_GROUPS is lowest -> highest, eligibility is simply:
- * base group + every group above it.
- *
- * Examples:
- * Women -> Women, Youth, u70, u80, u90, u100, 100+
- * Youth -> Youth, u70, u80, u90, u100, 100+
+ * Eligibility rules:
+ * Women -> Women + every Open class (NOT Youth)
+ * Youth -> Youth + every Open class (NOT Women)
  * u70   -> u70, u80, u90, u100, 100+
+ * u80   -> u80, u90, u100, 100+
+ * etc.
  */
 function eligibleClassesFor(player) {
   const baseRaw = String(player.weight_class || "").trim().toLowerCase();
@@ -173,15 +175,22 @@ function eligibleClassesFor(player) {
   const base =
     baseRaw === "women" || baseRaw === "woman" ? "u60kg" : baseRaw;
 
-  const baseIdx = ORDER_GROUPS.indexOf(base);
-  if (baseIdx === -1) return [];
+  let groups = [];
 
-  const labels = [];
-  for (let i = baseIdx; i < ORDER_GROUPS.length; i++) {
-    const group = ORDER_GROUPS[i];
-    for (const arm of ARMS) labels.push(`${group} ${arm}`);
+  if (base === "u60kg") {
+    // Women can rank in Women + all Open classes, but never Youth.
+    groups = ["u60kg", ...OPEN_GROUPS];
+  } else if (base === "youth") {
+    // Youth can rank in Youth + all Open classes, but never Women.
+    groups = ["youth", ...OPEN_GROUPS];
+  } else {
+    // Open-class competitors qualify for their own class and every heavier class.
+    const baseIdx = OPEN_GROUPS.indexOf(base);
+    if (baseIdx === -1) return [];
+    groups = OPEN_GROUPS.slice(baseIdx);
   }
-  return labels;
+
+  return groups.flatMap((group) => ARMS.map((arm) => `${group} ${arm}`));
 }
 
 function seedLadders(players, displayClasses) {
