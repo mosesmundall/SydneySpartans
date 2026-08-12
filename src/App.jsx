@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
 
 /* ===================== GROUPS & DISPLAY ===================== */
@@ -73,7 +73,7 @@ const CONFIG = {
   },
 
   defaultWindowDays: 30,
-  livePollMs: 2000,
+  livePollMs: 5000,
 };
 
 /* gviz (fast) CSV URL */
@@ -463,14 +463,10 @@ export default function App() {
   const [armFilter, setArmFilter] = useState("All");
   const [selectedPlayerId, setSelectedPlayerId] = useState(null);
   const [showActivity, setShowActivity] = useState(true);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
-  const [liveActive, setLiveActive] = useState(false);
-  const liveTimer = useRef(null);
 
-  async function loadAll(quiet = false) {
-    if (!quiet) setLoading(true);
+  async function loadAll() {
     setError("");
 
     try {
@@ -618,16 +614,30 @@ export default function App() {
     } catch (e) {
       console.error(e);
       setError(e?.message || "Could not load rankings data.");
-    } finally {
-      if (!quiet) setLoading(false);
     }
   }
 
   useEffect(() => {
+    let pollInFlight = false;
+
+    // Initial visible load.
     loadAll();
-    return () => {
-      if (liveTimer.current) clearInterval(liveTimer.current);
+
+    // Keep the rankings silently up to date while the page is open.
+    // Guard against overlapping requests if Google Sheets is slow.
+    const refreshLive = async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      try {
+        await loadAll();
+      } finally {
+        pollInFlight = false;
+      }
     };
+
+    const liveTimer = setInterval(refreshLive, CONFIG.livePollMs);
+
+    return () => clearInterval(liveTimer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -848,22 +858,6 @@ export default function App() {
     return CONFIG.photos.byPlayerId[id] || "";
   }
 
-  function startLiveMinute() {
-    if (liveTimer.current) clearInterval(liveTimer.current);
-    setLiveActive(true);
-    let ticks = 0;
-    loadAll(true);
-    liveTimer.current = setInterval(async () => {
-      ticks += 1;
-      await loadAll(true);
-      if (ticks >= 30) {
-        clearInterval(liveTimer.current);
-        liveTimer.current = null;
-        setLiveActive(false);
-      }
-    }, CONFIG.livePollMs);
-  }
-
   const searchLower = searchTerm.trim().toLowerCase();
 
   return (
@@ -874,7 +868,6 @@ export default function App() {
         .rank-shell { max-width: 1680px; margin: 0 auto; }
         .topbar { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:14px; }
         .brand-logo { width:64px; height:64px; border-radius:16px; object-fit:cover; box-shadow:0 12px 35px rgba(0,0,0,.35); }
-        .toolbar { margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
         .control:hover { transform:translateY(-1px); background:rgba(255,255,255,.11)!important; border-color:rgba(255,255,255,.25)!important; }
         .arm-btn.active { background:rgba(245,197,66,.15)!important; border-color:rgba(245,197,66,.55)!important; color:#ffe792!important; }
         .rank-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:18px; align-items:start; }
@@ -903,8 +896,6 @@ export default function App() {
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.001ms!important; animation-iteration-count:1!important; transition-duration:.001ms!important; } }
         @media (max-width: 760px) {
           .rank-grid { grid-template-columns:1fr; gap:14px; }
-          .toolbar { margin-left:0; width:100%; }
-          .toolbar > * { flex:1 1 auto; }
           .brand-logo { width:54px; height:54px; }
           .desktop-subtitle { font-size:12px!important; }
           .activity-layout { grid-template-columns:1fr!important; }
@@ -923,29 +914,18 @@ export default function App() {
                 {CONFIG.branding.clubName}
               </h1>
               <span style={{ ...pill, color: "#ffe792", borderColor: "rgba(245,197,66,.3)" }}>RANKINGS</span>
+              <span style={{ ...pill, color: green, borderColor: "rgba(52,211,153,.28)", background: "rgba(52,211,153,.07)" }}>● LIVE · auto updates</span>
             </div>
             <div className="desktop-subtitle" style={{ marginTop: 3, opacity: 0.72, fontSize: 13 }}>
               Live Sydney Ranks • Check out competitor profiles 
             </div>
           </div>
 
-          <div className="toolbar">
-            <button className="control" style={button} onClick={() => loadAll()} disabled={loading}>
-              {loading ? "Refreshing…" : "↻ Refresh"}
-            </button>
-            <button
-              className="control"
-              style={{ ...button, borderColor: liveActive ? "rgba(52,211,153,.55)" : button.border }}
-              onClick={startLiveMinute}
-            >
-              <span style={{ color: liveActive ? green : "inherit" }}>●</span> {liveActive ? "Live" : "Live 1 min"}
-            </button>
-          </div>
         </div>
 
         {error && (
           <div style={{ ...glass, borderRadius: 14, padding: 12, marginBottom: 14, borderColor: "rgba(251,113,133,.45)", color: "#fecdd3" }}>
-            <strong>Couldn’t refresh:</strong> {error}
+            <strong>Live update issue:</strong> {error}
           </div>
         )}
 
@@ -966,7 +946,7 @@ export default function App() {
             <div style={{ fontSize: 24, fontWeight: 900, marginTop: 2 }}>{sortedMatches.length}</div>
           </div>
           <div style={statCard}>
-            <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Last refreshed</div>
+            <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Last update</div>
             <div style={{ fontSize: 18, fontWeight: 850, marginTop: 5 }}>{lastUpdated ? formatTimeLocal(lastUpdated) : "—"}</div>
           </div>
         </div>
