@@ -197,6 +197,16 @@ function eligibleClassesFor(player) {
   return groups.flatMap((group) => ARMS.map((arm) => `${group} ${arm}`));
 }
 
+// Starting ranks are only a seed for the initial ladder state.
+// Only positive finite numbers count as valid seeds. Blanks, dashes (—/–/-),
+// text, zero, negatives, etc. are treated as UNSEEDED and start at the bottom.
+function validStartingRank(value) {
+  const t = String(value ?? "").trim();
+  if (!t) return Infinity;
+  const n = Number(t);
+  return Number.isFinite(n) && n > 0 ? n : Infinity;
+}
+
 function seedLadders(players, displayClasses) {
   const ladders = Object.fromEntries(displayClasses.map((wc) => [wc, []]));
   players
@@ -230,34 +240,29 @@ function seedLadders(players, displayClasses) {
       : null;
 
     ladders[wc].sort((a, b) => {
-      // If a player has NO starting rank, treat as Infinity so they sink to the bottom (unranked).
-      const aRank =
-        arm === "Right"
-          ? a.current_rank_rh
-            ? +a.current_rank_rh
-            : a.current_rank
-            ? +a.current_rank
-            : Infinity
-          : a.current_rank_lh
-          ? +a.current_rank_lh
-          : a.current_rank
-          ? +a.current_rank
-          : Infinity;
+      // Arm-specific seed first, with the legacy single-rank column only as fallback.
+      // A dash such as "—" is NOT a rank: it becomes Infinity and therefore sinks.
+      const aArmValue = arm === "Right" ? a.current_rank_rh : a.current_rank_lh;
+      const bArmValue = arm === "Right" ? b.current_rank_rh : b.current_rank_lh;
 
-      const bRank =
-        arm === "Right"
-          ? b.current_rank_rh
-            ? +b.current_rank_rh
-            : b.current_rank
-            ? +b.current_rank
-            : Infinity
-          : b.current_rank_lh
-          ? +b.current_rank_lh
-          : b.current_rank
-          ? +b.current_rank
-          : Infinity;
+      const aArmRank = validStartingRank(aArmValue);
+      const bArmRank = validStartingRank(bArmValue);
+      const aFallbackRank = validStartingRank(a.current_rank);
+      const bFallbackRank = validStartingRank(b.current_rank);
 
+      const aRank = Number.isFinite(aArmRank) ? aArmRank : aFallbackRank;
+      const bRank = Number.isFinite(bArmRank) ? bArmRank : bFallbackRank;
+
+      // 1) Anyone with a valid starting seed is placed by that seed.
       if (aRank !== bRank) return aRank - bRank;
+
+      // 2) Equal seeds, and especially all UNSEEDED players, follow Players-sheet
+      //    row order from top to bottom. This makes a newly-added unseeded player
+      //    at the bottom of the sheet start at the bottom of every eligible ladder.
+      const rowDiff = (a._playerRowIndex ?? Infinity) - (b._playerRowIndex ?? Infinity);
+      if (rowDiff !== 0) return rowDiff;
+
+      // Final deterministic fallback only.
       return a.name.localeCompare(b.name);
     });
   });
@@ -540,6 +545,9 @@ export default function App() {
           name: nm || safeId,
           weight_class: wc,
           active: yes(act),
+          // Preserve physical Players-sheet order for deterministic unseeded placement.
+          // idx 0 is the first data row beneath the header; larger idx = lower in sheet.
+          _playerRowIndex: idx,
           injuredRight,
           injuredLeft,
           current_rank_rh: srRight || srSingle || "",
