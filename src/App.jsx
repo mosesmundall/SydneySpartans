@@ -172,12 +172,13 @@ function parseInjury(val) {
  * u80   -> u80, u90, u100, 100+
  * etc.
  */
-function eligibleClassesFor(player) {
+function baseGroupFor(player) {
   const baseRaw = String(player.weight_class || "").trim().toLowerCase();
+  return baseRaw === "women" || baseRaw === "woman" ? "u60kg" : baseRaw;
+}
 
-  // Keep the existing internal key "u60kg" for the Women's ladder.
-  const base =
-    baseRaw === "women" || baseRaw === "woman" ? "u60kg" : baseRaw;
+function eligibleClassesFor(player) {
+  const base = baseGroupFor(player);
 
   let groups = [];
 
@@ -239,30 +240,40 @@ function seedLadders(players, displayClasses) {
       ? "Left"
       : null;
 
+    const ladderGroup = String(wc).replace(/\s+(Right|Left)$/i, "");
+
     ladders[wc].sort((a, b) => {
-      // Arm-specific seed first, with the legacy single-rank column only as fallback.
-      // A dash such as "—" is NOT a rank: it becomes Infinity and therefore sinks.
-      const aArmValue = arm === "Right" ? a.current_rank_rh : a.current_rank_lh;
-      const bArmValue = arm === "Right" ? b.current_rank_rh : b.current_rank_lh;
+      /*
+       * IMPORTANT SEEDING RULE:
+       * A player's starting rank applies ONLY to their BASE category.
+       * If they are merely eligible for a heavier category, they begin at the
+       * bottom of that heavier ladder and must earn movement there through matches.
+       *
+       * Example: a U80 competitor with RH starting rank 21 starts according to
+       * seed 21 in U80 Right, but is UNSEEDED in U90/U100/100kg+ Right.
+       */
+      const rankForThisLadder = (p) => {
+        if (baseGroupFor(p) !== ladderGroup) return Infinity;
 
-      const aArmRank = validStartingRank(aArmValue);
-      const bArmRank = validStartingRank(bArmValue);
-      const aFallbackRank = validStartingRank(a.current_rank);
-      const bFallbackRank = validStartingRank(b.current_rank);
+        const armValue = arm === "Right" ? p.current_rank_rh : p.current_rank_lh;
+        const armRank = validStartingRank(armValue);
+        if (Number.isFinite(armRank)) return armRank;
 
-      const aRank = Number.isFinite(aArmRank) ? aArmRank : aFallbackRank;
-      const bRank = Number.isFinite(bArmRank) ? bArmRank : bFallbackRank;
+        return validStartingRank(p.current_rank);
+      };
 
-      // 1) Anyone with a valid starting seed is placed by that seed.
+      const aRank = rankForThisLadder(a);
+      const bRank = rankForThisLadder(b);
+
+      // 1) Valid BASE-category starting seeds are ordered numerically: 1 is highest.
       if (aRank !== bRank) return aRank - bRank;
 
-      // 2) Equal seeds, and especially all UNSEEDED players, follow Players-sheet
-      //    row order from top to bottom. This makes a newly-added unseeded player
-      //    at the bottom of the sheet start at the bottom of every eligible ladder.
+      // 2) Everyone without a seed in THIS ladder (including cross-qualified
+      //    competitors from lighter/special categories) starts at the bottom in
+      //    Players-sheet row order, top row first and lower rows later.
       const rowDiff = (a._playerRowIndex ?? Infinity) - (b._playerRowIndex ?? Infinity);
       if (rowDiff !== 0) return rowDiff;
 
-      // Final deterministic fallback only.
       return a.name.localeCompare(b.name);
     });
   });
