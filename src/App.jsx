@@ -74,6 +74,11 @@ const CONFIG = {
     ring: true,
   },
 
+  validation: {
+    allowedPlayerWeightClasses: ["women", "woman", "u60kg", "youth", "u70kg", "u80kg", "u90kg", "u100kg", "100kg+"],
+    dateHelp: 'Use DD/MM/YYYY. Ambiguous dates such as 07/05/2025 cannot be automatically distinguished from US-style input, so enter all new dates consistently.',
+  },
+
   defaultWindowDays: 30,
   livePollMs: 5000,
 };
@@ -513,6 +518,265 @@ function uniqueBy(items, keyFn) {
   });
 }
 
+
+/* ===================== DATA HEALTH / ADMIN ===================== */
+function sheetEditUrl(sheetKey, row) {
+  const sheet = CONFIG.sheets[sheetKey];
+  if (!sheet) return "";
+  const range = row ? `&range=A${row}:Z${row}` : "";
+  return `https://docs.google.com/spreadsheets/d/${sheet.id}/edit#gid=${sheet.gid}${range}`;
+}
+
+function levenshtein(a, b) {
+  const x = String(a || "");
+  const y = String(b || "");
+  const dp = Array.from({ length: y.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= x.length; i += 1) {
+    let prev = dp[0];
+    dp[0] = i;
+    for (let j = 1; j <= y.length; j += 1) {
+      const hold = dp[j];
+      dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + (x[i - 1] === y[j - 1] ? 0 : 1));
+      prev = hold;
+    }
+  }
+  return dp[y.length];
+}
+
+function closestPlayerId(value, validIds) {
+  const needle = trim(value).toLowerCase();
+  if (!needle) return "";
+  const exactCaseInsensitive = validIds.find((id) => id.toLowerCase() === needle);
+  if (exactCaseInsensitive) return exactCaseInsensitive;
+  const normalized = needle.replace(/[^a-z0-9]/g, "");
+  const normalizedMatch = validIds.find((id) => id.toLowerCase().replace(/[^a-z0-9]/g, "") === normalized);
+  if (normalizedMatch) return normalizedMatch;
+
+  let best = "";
+  let bestDistance = Infinity;
+  validIds.forEach((id) => {
+    const d = levenshtein(needle, id.toLowerCase());
+    if (d < bestDistance) {
+      bestDistance = d;
+      best = id;
+    }
+  });
+  const threshold = Math.max(2, Math.min(4, Math.floor(needle.length / 3)));
+  return bestDistance <= threshold ? best : "";
+}
+
+function strictDateInfo(value) {
+  const t = trim(value);
+  if (!t) return { parsed: null, valid: false, format: "missing", inconsistent: false };
+
+  const slash = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(t);
+  if (slash) {
+    const a = +slash[1];
+    const b = +slash[2];
+    const y = +slash[3];
+    let d;
+    let mo;
+    let inconsistent = false;
+
+    if (a > 12 && b <= 12) {
+      d = a;
+      mo = b;
+    } else if (b > 12 && a <= 12) {
+      // This can only be MM/DD/YYYY, so it is inconsistent with our DD/MM/YYYY standard.
+      d = b;
+      mo = a;
+      inconsistent = true;
+    } else {
+      // Ambiguous values are interpreted as DD/MM/YYYY by the ranking code.
+      d = a;
+      mo = b;
+    }
+
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) {
+      return { parsed: null, valid: false, format: "slash", inconsistent };
+    }
+    const ms = Date.UTC(y, mo - 1, d, 12, 0, 0);
+    const parsed = new Date(ms);
+    const valid = parsed.getUTCFullYear() === y && parsed.getUTCMonth() === mo - 1 && parsed.getUTCDate() === d;
+    return { parsed: valid ? parsed : null, valid, format: "slash", inconsistent };
+  }
+
+  // The ranking parser may support legacy/ISO values, but the admin standard is DD/MM/YYYY.
+  const parsed = parseDateTimeUTC(t);
+  return { parsed, valid: Boolean(parsed), format: "other", inconsistent: true };
+}
+
+function validateClubData(playerRows, matchRows) {
+  const issues = [];
+  let issueSeq = 0;
+  const add = (severity, source, row, field, message, value = "", fix = "", extra = {}) => {
+    issues.push({
+      id: `issue_${issueSeq++}`,
+      severity,
+      source,
+      row,
+      field,
+      message,
+      value: trim(value),
+      fix,
+      ...extra,
+    });
+  };
+
+  const allowedWeights = new Set((CONFIG.validation?.allowedPlayerWeightClasses || []).map((x) => x.toLowerCase()));
+  const playerIdRows = new Map();
+  const validIds = [];
+
+  (playerRows || []).forEach((raw, idx) => {
+    const row = idx + 2; // row 1 is the header in Google Sheets
+    const r = normalizeRow(raw);
+    const id = trim(gv(r, "id", "player id", "player_id"));
+    const name = trim(gv(r, "name", "display name", "display_name"));
+    const wc = trim(gv(r, "weight class", "weight_class"));
+    const active = trim(gv(r, "active", "currently active?", "currently active"));
+    const injury = trim(gv(r, "injured?", "injured", "injury"));
+
+    if (!id) {
+      add("error", "Players", row, "Player ID", "Blank Player ID", "", "Enter a unique Player ID, e.g. moses_m.");
+    } else {
+      validIds.push(id);
+      if (!playerIdRows.has(id)) playerIdRows.set(id, []);
+      playerIdRows.get(id).push(row);
+      if (!/^[a-z0-9_]+$/.test(id)) {
+        add("warning", "Players", row, "Player ID", "Player ID uses an unusual format", id, "Use lowercase letters, numbers and underscores where possible.");
+      }
+    }
+
+    if (!name) {
+      add("error", "Players", row, "Name", "Blank competitor name", "", "Enter the competitor's display name.");
+    }
+
+    if (!wc) {
+      add("error", "Players", row, "Weight Class", "Missing weight class", "", `Enter one of: ${CONFIG.validation.allowedPlayerWeightClasses.join(", ")}.`);
+    } else if (!allowedWeights.has(wc.toLowerCase())) {
+      add("error", "Players", row, "Weight Class", "Invalid weight class", wc, `Use one of: ${CONFIG.validation.allowedPlayerWeightClasses.join(", ")}.`);
+    }
+
+    if (!active) {
+      add("warning", "Players", row, "Active", "Missing Active value", "", "Set Active to TRUE or FALSE.");
+    } else if (!["true", "false"].includes(active.toLowerCase())) {
+      add("warning", "Players", row, "Active", "Invalid Active value", active, "Use TRUE or FALSE exactly.");
+    }
+
+    if (injury) {
+      const tokens = injury.toLowerCase().split(/[,\s/;|]+/).filter(Boolean);
+      const allowedInjury = new Set(["right", "left", "r", "l", "both", "none", "no", "false"]);
+      const bad = tokens.filter((token) => !allowedInjury.has(token));
+      if (bad.length) {
+        add("warning", "Players", row, "Injured?", "Unrecognised injury value", injury, "Use RIGHT, LEFT, BOTH, or leave blank when not injured.");
+      }
+    }
+  });
+
+  playerIdRows.forEach((rows, id) => {
+    if (rows.length < 2) return;
+    rows.forEach((row) => {
+      const otherRows = rows.filter((x) => x !== row).join(", ");
+      add("error", "Players", row, "Player ID", "Duplicate Player ID", id, `Change this ID so it is unique. The same ID also appears on row${otherRows.includes(",") ? "s" : ""} ${otherRows}.`);
+    });
+  });
+
+  const uniqueValidIds = Array.from(new Set(validIds));
+  const validIdSet = new Set(uniqueValidIds);
+  const matchSignatures = new Map();
+  const now = new Date();
+  const todayUtc = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+
+  (matchRows || []).forEach((raw, idx) => {
+    const row = idx + 2;
+    const r = normalizeRow(raw);
+    const date = trim(gv(r, "date", "DATE"));
+    const winner = trim(gv(r, "winner id", "winner_id"));
+    const loser = trim(gv(r, "loser id", "loser_id", "looser id", "looser_id"));
+    const rawArm = trim(gv(r, "arm?", "arm"));
+
+    if (!date) {
+      add("error", "Matches", row, "DATE", "Missing match date", "", "Enter the date as DD/MM/YYYY.");
+    } else {
+      const info = strictDateInfo(date);
+      if (!info.valid) {
+        add("error", "Matches", row, "DATE", "Invalid date", date, "Enter a real calendar date as DD/MM/YYYY.");
+      } else {
+        if (info.inconsistent) {
+          add("error", "Matches", row, "DATE", "Inconsistent date format", date, "Convert this row to DD/MM/YYYY.");
+        }
+        const dayUtc = Date.UTC(info.parsed.getUTCFullYear(), info.parsed.getUTCMonth(), info.parsed.getUTCDate());
+        if (dayUtc > todayUtc) {
+          add("error", "Matches", row, "DATE", "Future-dated match", date, "Correct the date, or wait until that date before entering the match as a completed result.");
+        }
+      }
+    }
+
+    if (!winner) {
+      add("error", "Matches", row, "Winner ID", "Missing Winner ID", "", "Enter the exact Player ID from the Players sheet.");
+    } else if (!validIdSet.has(winner)) {
+      const suggestion = closestPlayerId(winner, uniqueValidIds);
+      add("error", "Matches", row, "Winner ID", "Winner ID not found in Players sheet", winner, suggestion ? `Possible match: ${suggestion}` : "Use an exact Player ID from the Players sheet.");
+    }
+
+    if (!loser) {
+      add("error", "Matches", row, "Looser ID", "Missing Loser ID", "", "Enter the exact Player ID from the Players sheet.");
+    } else if (!validIdSet.has(loser)) {
+      const suggestion = closestPlayerId(loser, uniqueValidIds);
+      add("error", "Matches", row, "Looser ID", "Loser ID not found in Players sheet", loser, suggestion ? `Possible match: ${suggestion}` : "Use an exact Player ID from the Players sheet.");
+    }
+
+    if (winner && loser && winner === loser) {
+      add("error", "Matches", row, "Winner/Loser", "Winner and loser are identical", winner, "Choose two different competitor IDs.");
+    }
+
+    const arm = rawArm.toLowerCase();
+    if (!rawArm) {
+      add("error", "Matches", row, "Arm?", "Missing arm", "", "Enter RIGHT or LEFT.");
+    } else if (!["right", "left", "r", "l"].includes(arm)) {
+      add("error", "Matches", row, "Arm?", "Invalid arm", rawArm, "Use RIGHT or LEFT.");
+    }
+
+    if (date && winner && loser && rawArm) {
+      const signature = [date.toLowerCase(), winner.toLowerCase(), loser.toLowerCase(), arm].join("|");
+      if (!matchSignatures.has(signature)) matchSignatures.set(signature, []);
+      matchSignatures.get(signature).push(row);
+    }
+  });
+
+  matchSignatures.forEach((rows) => {
+    if (rows.length < 2) return;
+    rows.slice(1).forEach((row) => {
+      add("warning", "Matches", row, "Match row", "Possible duplicate match", "", `This same date/winner/loser/arm combination also appears earlier on row ${rows[0]}. Check whether both results are intentional.`);
+    });
+  });
+
+  const rawPlayerIdSet = new Set(uniqueValidIds);
+  Object.keys(CONFIG.photos?.byPlayerId || {}).forEach((photoId) => {
+    if (!rawPlayerIdSet.has(photoId)) {
+      add(
+        "warning",
+        "Code",
+        null,
+        "CONFIG.photos.byPlayerId",
+        "Photo mapping does not match a Player ID",
+        photoId,
+        "Either correct the photo mapping key or add the matching Player ID to the Players sheet.",
+        { codeLocation: `CONFIG.photos.byPlayerId.${photoId}` }
+      );
+    }
+  });
+
+  const order = { error: 0, warning: 1 };
+  issues.sort((a, b) => {
+    if (order[a.severity] !== order[b.severity]) return order[a.severity] - order[b.severity];
+    if (a.source !== b.source) return a.source.localeCompare(b.source);
+    return (a.row ?? Infinity) - (b.row ?? Infinity);
+  });
+
+  return issues;
+}
+
 /* ===================== APP ===================== */
 export default function App() {
   const [players, setPlayers] = useState([]);
@@ -525,6 +789,13 @@ export default function App() {
   const [showActivity, setShowActivity] = useState(true);
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [dataIssues, setDataIssues] = useState([]);
+  const [dataHealthMeta, setDataHealthMeta] = useState({ playerRows: 0, matchRows: 0 });
+  const [issueFilter, setIssueFilter] = useState("All");
+  const [adminMode, setAdminMode] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("admin") === "1";
+  });
 
   async function loadAll() {
     setError("");
@@ -534,6 +805,10 @@ export default function App() {
         fetchCsv(csvUrl(CONFIG.sheets.players)),
         fetchCsv(csvUrl(CONFIG.sheets.matches)),
       ]);
+
+      // Validate the raw sheet rows before ranking parsing/fallbacks can hide data-entry problems.
+      setDataIssues(validateClubData(pRows, mRows));
+      setDataHealthMeta({ playerRows: pRows.length, matchRows: mRows.length });
 
       /* ---- Players ---- */
       const p = pRows.map((raw, idx) => {
@@ -716,6 +991,23 @@ export default function App() {
     return () => clearInterval(liveTimer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const onPopState = () => setAdminMode(new URLSearchParams(window.location.search).get("admin") === "1");
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  function setAdminPage(enabled) {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (enabled) url.searchParams.set("admin", "1");
+    else url.searchParams.delete("admin");
+    window.history.pushState({}, "", url);
+    setAdminMode(enabled);
+    setSelectedPlayerId(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 
   useEffect(() => {
     if (!selectedPlayerId) return undefined;
@@ -904,6 +1196,10 @@ export default function App() {
   const activePlayers = players.filter((p) => p.active);
 
   const invalidDateCount = matches.filter((m) => m._invalidDate).length;
+  const dataHealthCounts = useMemo(() => ({
+    errors: dataIssues.filter((x) => x.severity === "error").length,
+    warnings: dataIssues.filter((x) => x.severity === "warning").length,
+  }), [dataIssues]);
 
   // Highest CURRENT arm-specific streak across active competitors.
   // Right and Left are intentionally independent: a loss only resets the streak
@@ -1019,6 +1315,129 @@ export default function App() {
 
   const searchLower = searchTerm.trim().toLowerCase();
 
+
+  if (adminMode) {
+    const filteredIssues = dataIssues.filter((issue) =>
+      issueFilter === "All" || (issueFilter === "Errors" && issue.severity === "error") || (issueFilter === "Warnings" && issue.severity === "warning")
+    );
+
+    return (
+      <div style={pageStyle}>
+        <style>{`
+          * { box-sizing: border-box; }
+          button { font: inherit; }
+          .admin-shell { max-width: 1180px; margin: 0 auto; }
+          .admin-grid { display:grid; grid-template-columns:repeat(4,minmax(150px,1fr)); gap:10px; }
+          .issue-card { border-radius:15px; padding:14px; background:rgba(255,255,255,.055); border:1px solid rgba(255,255,255,.1); }
+          .issue-card + .issue-card { margin-top:9px; }
+          @media (max-width:760px) { .admin-grid { grid-template-columns:1fr 1fr; } }
+        `}</style>
+
+        <div className="admin-shell">
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap", marginBottom:16 }}>
+            <div>
+              <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+                <h1 style={{ margin:0, fontSize:"clamp(25px,4vw,36px)", letterSpacing:-0.7 }}>Data Health</h1>
+                <span style={{ ...pill, color: green, borderColor:"rgba(52,211,153,.28)", background:"rgba(52,211,153,.07)" }}>● LIVE · auto checks</span>
+              </div>
+              <div style={{ opacity:.65, fontSize:13, marginTop:4 }}>{CONFIG.branding.clubName} · Admin diagnostics</div>
+            </div>
+            <button className="control" style={button} onClick={() => setAdminPage(false)}>← Back to rankings</button>
+          </div>
+
+          {error && (
+            <div style={{ ...glass, borderRadius:14, padding:12, marginBottom:14, borderColor:"rgba(251,113,133,.45)", color:"#fecdd3" }}>
+              <strong>Sheet connection issue:</strong> {error}
+            </div>
+          )}
+
+          <div className="admin-grid" style={{ marginBottom:14 }}>
+            <div style={{ ...statCard, borderColor: dataHealthCounts.errors ? "rgba(251,113,133,.4)" : "rgba(52,211,153,.25)" }}>
+              <div style={{ fontSize:11, opacity:.62, textTransform:"uppercase", letterSpacing:1 }}>Errors</div>
+              <div style={{ fontSize:27, fontWeight:950, marginTop:2, color:dataHealthCounts.errors ? "#fda4af" : green }}>● {dataHealthCounts.errors}</div>
+            </div>
+            <div style={{ ...statCard, borderColor: dataHealthCounts.warnings ? "rgba(251,191,36,.35)" : "rgba(52,211,153,.25)" }}>
+              <div style={{ fontSize:11, opacity:.62, textTransform:"uppercase", letterSpacing:1 }}>Warnings</div>
+              <div style={{ fontSize:27, fontWeight:950, marginTop:2, color:dataHealthCounts.warnings ? "#fde68a" : green }}>● {dataHealthCounts.warnings}</div>
+            </div>
+            <div style={statCard}>
+              <div style={{ fontSize:11, opacity:.62, textTransform:"uppercase", letterSpacing:1 }}>Players checked</div>
+              <div style={{ fontSize:27, fontWeight:950, marginTop:2 }}>{dataHealthMeta.playerRows}</div>
+            </div>
+            <div style={statCard}>
+              <div style={{ fontSize:11, opacity:.62, textTransform:"uppercase", letterSpacing:1 }}>Matches checked</div>
+              <div style={{ fontSize:27, fontWeight:950, marginTop:2 }}>{dataHealthMeta.matchRows}</div>
+            </div>
+          </div>
+
+          <div style={{ ...glass, borderRadius:16, padding:13, marginBottom:14 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", gap:12, flexWrap:"wrap", alignItems:"center" }}>
+              <div>
+                <div style={{ fontWeight:850 }}>Validation rules</div>
+                <div style={{ opacity:.62, fontSize:12, marginTop:3 }}>{CONFIG.validation.dateHelp}</div>
+                <div style={{ opacity:.5, fontSize:11, marginTop:3 }}>Starting-rank/seed fields and blank Badge? cells are intentionally not checked.</div>
+              </div>
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                {["All", "Errors", "Warnings"].map((f) => (
+                  <button key={f} className="control" style={{ ...button, ...(issueFilter === f ? { borderColor:"rgba(245,197,66,.55)", color:"#ffe792", background:"rgba(245,197,66,.11)" } : {}) }} onClick={() => setIssueFilter(f)}>
+                    {f}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {dataIssues.length === 0 ? (
+            <div style={{ ...glass, borderRadius:18, padding:"28px 20px", textAlign:"center", borderColor:"rgba(52,211,153,.3)" }}>
+              <div style={{ fontSize:34 }}>✅</div>
+              <div style={{ fontSize:20, fontWeight:900, marginTop:7 }}>All clear</div>
+              <div style={{ opacity:.62, fontSize:13, marginTop:5 }}>No data-entry errors or warnings were found in the current sheets or photo configuration.</div>
+            </div>
+          ) : filteredIssues.length === 0 ? (
+            <div style={{ ...glass, borderRadius:16, padding:18, textAlign:"center", opacity:.72 }}>No issues in this filter.</div>
+          ) : (
+            <div>
+              {filteredIssues.map((issue) => {
+                const isError = issue.severity === "error";
+                const sheetKey = issue.source === "Players" ? "players" : issue.source === "Matches" ? "matches" : null;
+                const location = issue.source === "Code"
+                  ? (issue.codeLocation || issue.field)
+                  : `${issue.source} sheet · Row ${issue.row}`;
+                return (
+                  <div className="issue-card" key={issue.id} style={{ borderColor:isError ? "rgba(251,113,133,.32)" : "rgba(251,191,36,.28)" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
+                      <div style={{ minWidth:0, flex:1 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                          <span style={{ ...pill, padding:"3px 7px", color:isError ? "#fecdd3" : "#fde68a", borderColor:isError ? "rgba(251,113,133,.34)" : "rgba(251,191,36,.3)", background:isError ? "rgba(251,113,133,.08)" : "rgba(251,191,36,.07)" }}>
+                            {isError ? "🔴 ERROR" : "🟠 WARNING"}
+                          </span>
+                          <strong style={{ fontSize:14 }}>{issue.message}</strong>
+                        </div>
+                        <div style={{ marginTop:7, fontSize:12, fontWeight:800, color:"#cbd5e1" }}>{location} · {issue.field}</div>
+                        {issue.value && <div style={{ marginTop:5, fontSize:12, opacity:.72 }}>Current value: <code style={{ color:"white", background:"rgba(0,0,0,.22)", padding:"2px 5px", borderRadius:5 }}>{issue.value}</code></div>}
+                        {issue.fix && <div style={{ marginTop:6, fontSize:12.5, lineHeight:1.45, opacity:.8 }}><strong>Fix:</strong> {issue.fix}</div>}
+                      </div>
+                      {sheetKey && issue.row && (
+                        <a href={sheetEditUrl(sheetKey, issue.row)} target="_blank" rel="noreferrer" style={{ ...button, textDecoration:"none", alignSelf:"flex-start", whiteSpace:"nowrap" }}>
+                          Open row ↗
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div style={{ opacity:.45, fontSize:11, marginTop:14, textAlign:"center" }}>
+            Last checked {lastUpdated ? formatTimeLocal(lastUpdated) : "—"} · refreshes every {Math.round(CONFIG.livePollMs / 1000)} seconds
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+
   return (
     <div style={pageStyle}>
       <style>{`
@@ -1083,6 +1502,15 @@ export default function App() {
               Live Sydney Ranks • Check out competitor profiles 
             </div>
           </div>
+
+          <button
+            className="control"
+            style={{ ...button, marginLeft: "auto", opacity: 0.72 }}
+            onClick={() => setAdminPage(true)}
+            title="Open data health diagnostics"
+          >
+            ⚙ Data health{dataHealthCounts.errors > 0 ? ` · ${dataHealthCounts.errors}` : ""}
+          </button>
 
         </div>
 
