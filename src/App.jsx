@@ -774,13 +774,6 @@ export default function App() {
   );
 
   const activePlayers = players.filter((p) => p.active);
-  const uniqueChampions = useMemo(() => {
-    const ids = new Set();
-    Object.values(nowData.ladders || {}).forEach((ladder) => {
-      if (ladder?.[0]?.id) ids.add(ladder[0].id);
-    });
-    return ids.size;
-  }, [nowData.ladders]);
 
   const invalidDateCount = matches.filter((m) => m._invalidDate).length;
   const selectedPlayer = selectedPlayerId ? playerById.get(selectedPlayerId) : null;
@@ -971,10 +964,6 @@ export default function App() {
           <div style={statCard}>
             <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Recorded matches</div>
             <div style={{ fontSize: 24, fontWeight: 900, marginTop: 2 }}>{sortedMatches.length}</div>
-          </div>
-          <div style={statCard}>
-            <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Current champions</div>
-            <div style={{ fontSize: 24, fontWeight: 900, marginTop: 2 }}>{uniqueChampions}</div>
           </div>
           <div style={statCard}>
             <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Last refreshed</div>
