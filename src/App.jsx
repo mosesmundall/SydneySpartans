@@ -67,6 +67,8 @@ const CONFIG = {
       lachlan_c: "/lachlan_champ.png",
       dimi_b: "/dimi_champ.png",
       jacob_s: "/shiggs_champ.png",
+      aidan_b: "/aidan_champ.png",
+      harrison_r: "/harrison_champ.png",
     },
     size: 72,
     ring: true,
