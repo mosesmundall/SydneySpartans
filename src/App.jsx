@@ -67,9 +67,6 @@ const CONFIG = {
       lachlan_c: "/lachlan_champ.png",
       dimi_b: "/dimi_champ.png",
       jacob_s: "/shiggs_champ.png",
-      aidan_b: "/aidan_champ.png",
-      harrison_r: "/harrison_champ.png",
-      
     },
     size: 72,
     ring: true,
@@ -793,8 +790,12 @@ export default function App() {
         rightLosses: 0,
         leftWins: 0,
         leftLosses: 0,
-        currentStreak: 0,
-        bestStreak: 0,
+        rightCurrentStreak: 0,
+        rightBestStreak: 0,
+        rightLastWinMs: 0,
+        leftCurrentStreak: 0,
+        leftBestStreak: 0,
+        leftLastWinMs: 0,
         history: [],
         takeoverKeys: new Set(),
         defenseKeys: new Set(),
@@ -808,17 +809,30 @@ export default function App() {
 
       if (w) {
         w.wins += 1;
-        if (m.arm === "Right") w.rightWins += 1;
-        if (m.arm === "Left") w.leftWins += 1;
-        w.currentStreak += 1;
-        w.bestStreak = Math.max(w.bestStreak, w.currentStreak);
+        if (m.arm === "Right") {
+          w.rightWins += 1;
+          w.rightCurrentStreak += 1;
+          w.rightBestStreak = Math.max(w.rightBestStreak, w.rightCurrentStreak);
+          w.rightLastWinMs = m._parsedDate?.getTime?.() || w.rightLastWinMs || 0;
+        }
+        if (m.arm === "Left") {
+          w.leftWins += 1;
+          w.leftCurrentStreak += 1;
+          w.leftBestStreak = Math.max(w.leftBestStreak, w.leftCurrentStreak);
+          w.leftLastWinMs = m._parsedDate?.getTime?.() || w.leftLastWinMs || 0;
+        }
         w.history.push({ ...m, result: "W", opponentId: m.loser_id });
       }
       if (l) {
         l.losses += 1;
-        if (m.arm === "Right") l.rightLosses += 1;
-        if (m.arm === "Left") l.leftLosses += 1;
-        l.currentStreak = 0;
+        if (m.arm === "Right") {
+          l.rightLosses += 1;
+          l.rightCurrentStreak = 0;
+        }
+        if (m.arm === "Left") {
+          l.leftLosses += 1;
+          l.leftCurrentStreak = 0;
+        }
         l.history.push({ ...m, result: "L", opponentId: m.winner_id });
       }
     });
@@ -888,9 +902,50 @@ export default function App() {
   const activePlayers = players.filter((p) => p.active);
 
   const invalidDateCount = matches.filter((m) => m._invalidDate).length;
+
+  // Highest CURRENT arm-specific streak across active competitors.
+  // Right and Left are intentionally independent: a loss only resets the streak
+  // on the arm that actually lost. Ties are broken by the most recent win, then
+  // by name for deterministic display.
+  const highestCurrentStreak = useMemo(() => {
+    const candidates = [];
+
+    players.forEach((p) => {
+      if (!p.active) return;
+      const s = playerStats.get(p.id);
+      if (!s) return;
+
+      candidates.push({
+        player: p,
+        arm: "Right",
+        streak: s.rightCurrentStreak || 0,
+        lastWinMs: s.rightLastWinMs || 0,
+      });
+      candidates.push({
+        player: p,
+        arm: "Left",
+        streak: s.leftCurrentStreak || 0,
+        lastWinMs: s.leftLastWinMs || 0,
+      });
+    });
+
+    candidates.sort((a, b) => {
+      if (a.streak !== b.streak) return b.streak - a.streak;
+      if (a.lastWinMs !== b.lastWinMs) return b.lastWinMs - a.lastWinMs;
+      return (a.player?.name || "").localeCompare(b.player?.name || "");
+    });
+
+    return candidates[0]?.streak > 0 ? candidates[0] : null;
+  }, [players, playerStats]);
+
   const selectedPlayer = selectedPlayerId ? playerById.get(selectedPlayerId) : null;
   const selectedRanks = selectedPlayer ? ranksByPlayer.get(selectedPlayer.id) || [] : [];
   const selectedStats = selectedPlayer ? playerStats.get(selectedPlayer.id) : null;
+  const selectedCurrentArmStreak = selectedStats
+    ? selectedStats.rightCurrentStreak >= selectedStats.leftCurrentStreak
+      ? { arm: "Right", streak: selectedStats.rightCurrentStreak || 0 }
+      : { arm: "Left", streak: selectedStats.leftCurrentStreak || 0 }
+    : { arm: "Right", streak: 0 };
   const selectedChampionCount = selectedRanks.filter((r) => r.rank === 1).length;
   const selectedRecentHistory = selectedStats
     ? selectedStats.history.slice().reverse().slice(0, 8)
@@ -1046,6 +1101,23 @@ export default function App() {
           <div style={statCard}>
             <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Recorded matches</div>
             <div style={{ fontSize: 24, fontWeight: 900, marginTop: 2 }}>{visibleMatches.length}</div>
+          </div>
+          <div
+            style={{ ...statCard, cursor: highestCurrentStreak ? "pointer" : "default" }}
+            onClick={() => highestCurrentStreak && setSelectedPlayerId(highestCurrentStreak.player.id)}
+            title={highestCurrentStreak ? `Open ${highestCurrentStreak.player.name}'s profile` : undefined}
+          >
+            <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Current highest streak</div>
+            {highestCurrentStreak ? (
+              <>
+                <div style={{ fontSize: 22, fontWeight: 950, marginTop: 2, color: "#fde68a", whiteSpace: "nowrap" }}>🔥 {highestCurrentStreak.streak}</div>
+                <div style={{ fontSize: 11.5, opacity: 0.78, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {highestCurrentStreak.player.name} · {highestCurrentStreak.arm}
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 18, fontWeight: 850, marginTop: 5 }}>—</div>
+            )}
           </div>
           <div style={statCard}>
             <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Last update</div>
@@ -1356,7 +1428,9 @@ export default function App() {
             <div style={{ marginTop: 20 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                 <h3 style={{ margin: 0, fontSize: 14 }}>Recent matches</h3>
-                {(selectedStats?.currentStreak || 0) > 1 && <span style={{ fontSize: 11, color: green }}>🔥 {selectedStats.currentStreak} win streak</span>}
+                {selectedCurrentArmStreak.streak > 1 && (
+                  <span style={{ fontSize: 11, color: green }}>🔥 {selectedCurrentArmStreak.streak} {selectedCurrentArmStreak.arm.toLowerCase()}-arm win streak</span>
+                )}
               </div>
               <div style={{ marginTop: 7 }}>
                 {selectedRecentHistory.length === 0 ? (
