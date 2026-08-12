@@ -27,8 +27,8 @@ const DISPLAY_CLASSES = [
     .slice()
     .reverse()
     .flatMap((g) => ARMS.map((a) => `${g} ${a}`)),
-  ...ARMS.map((a) => `youth ${a}`),
   ...ARMS.map((a) => `u60kg ${a}`),
+  ...ARMS.map((a) => `youth ${a}`),
 ];
 
 /* ===================== CONFIG ===================== */
