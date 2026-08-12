@@ -210,28 +210,66 @@ function validStartingRank(value) {
 
 function seedLadders(players, displayClasses) {
   const ladders = Object.fromEntries(displayClasses.map((wc) => [wc, []]));
-  players
-    .filter((p) => p.active)
-    .forEach((p) => {
-      const elig = eligibleClassesFor(p);
-      elig.forEach((wc) => {
-        const arm = wc.endsWith(" Right")
-          ? "Right"
-          : wc.endsWith(" Left")
-          ? "Left"
-          : null;
 
-        // exclude from specific arm if injured
-        const canEnter =
-          arm === "Right"
-            ? !p.injuredRight
-            : arm === "Left"
-            ? !p.injuredLeft
-            : true;
+  /*
+   * GLOBAL-SEED MODEL
+   * -----------------
+   * The Starting Rank columns come from the old single club-wide ladder.
+   * They are NOT category-specific ranks.
+   *
+   * Therefore we first reconstruct that old global order independently for
+   * Right and Left arm:
+   *   1 = best overall, 2 = next best, etc.
+   *   valid numeric seeds first; unseeded players go underneath them in
+   *   Players-sheet row order.
+   *
+   * Only AFTER that global order exists do we create each category ladder by
+   * filtering out players who are not eligible for that category.
+   *
+   * Example: if Bhavya is global RH seed 21, he begins around that part of the
+   * global order. In U100 he may move up a few places only because heavier
+   * 100kg+ competitors are ineligible for U100; he must NOT become #2 merely
+   * because he is a U80 competitor or because of his Players-sheet row.
+   *
+   * Historical matches are replayed after this seed stage and always override
+   * the starting order wherever a real takeover occurs.
+   */
 
-        if (canEnter && ladders[wc]) ladders[wc].push(p);
+  const seedForArm = (p, arm) => {
+    const armValue = arm === "Right" ? p.current_rank_rh : p.current_rank_lh;
+    const armRank = validStartingRank(armValue);
+    if (Number.isFinite(armRank)) return armRank;
+    return validStartingRank(p.current_rank);
+  };
+
+  const globalOrderByArm = {};
+
+  ARMS.forEach((arm) => {
+    globalOrderByArm[arm] = players
+      .filter((p) => {
+        if (!p.active) return false;
+        if (arm === "Right" && p.injuredRight) return false;
+        if (arm === "Left" && p.injuredLeft) return false;
+        return true;
+      })
+      .slice()
+      .sort((a, b) => {
+        const aRank = seedForArm(a, arm);
+        const bRank = seedForArm(b, arm);
+
+        // Old overall rank: lower number is better. Any valid numbered seed
+        // always sits above every unseeded player.
+        if (aRank !== bRank) return aRank - bRank;
+
+        // Duplicate seed values or two unseeded players are resolved by their
+        // physical Players-sheet order, top row first.
+        const rowDiff =
+          (a._playerRowIndex ?? Infinity) - (b._playerRowIndex ?? Infinity);
+        if (rowDiff !== 0) return rowDiff;
+
+        return a.name.localeCompare(b.name);
       });
-    });
+  });
 
   Object.keys(ladders).forEach((wc) => {
     const arm = wc.endsWith(" Right")
@@ -240,42 +278,13 @@ function seedLadders(players, displayClasses) {
       ? "Left"
       : null;
 
-    const ladderGroup = String(wc).replace(/\s+(Right|Left)$/i, "");
+    if (!arm) return;
 
-    ladders[wc].sort((a, b) => {
-      /*
-       * IMPORTANT SEEDING RULE:
-       * A player's starting rank applies ONLY to their BASE category.
-       * If they are merely eligible for a heavier category, they begin at the
-       * bottom of that heavier ladder and must earn movement there through matches.
-       *
-       * Example: a U80 competitor with RH starting rank 21 starts according to
-       * seed 21 in U80 Right, but is UNSEEDED in U90/U100/100kg+ Right.
-       */
-      const rankForThisLadder = (p) => {
-        if (baseGroupFor(p) !== ladderGroup) return Infinity;
-
-        const armValue = arm === "Right" ? p.current_rank_rh : p.current_rank_lh;
-        const armRank = validStartingRank(armValue);
-        if (Number.isFinite(armRank)) return armRank;
-
-        return validStartingRank(p.current_rank);
-      };
-
-      const aRank = rankForThisLadder(a);
-      const bRank = rankForThisLadder(b);
-
-      // 1) Valid BASE-category starting seeds are ordered numerically: 1 is highest.
-      if (aRank !== bRank) return aRank - bRank;
-
-      // 2) Everyone without a seed in THIS ladder (including cross-qualified
-      //    competitors from lighter/special categories) starts at the bottom in
-      //    Players-sheet row order, top row first and lower rows later.
-      const rowDiff = (a._playerRowIndex ?? Infinity) - (b._playerRowIndex ?? Infinity);
-      if (rowDiff !== 0) return rowDiff;
-
-      return a.name.localeCompare(b.name);
-    });
+    // "Divide" the old global ladder into the new category ladder while
+    // preserving the global relative order of every eligible competitor.
+    ladders[wc] = (globalOrderByArm[arm] || []).filter((p) =>
+      eligibleClassesFor(p).includes(wc)
+    );
   });
 
   return ladders;
@@ -503,7 +512,9 @@ export default function App() {
         const injCol = trim(gv(r, "injured?", "injured", "injury"));
         const { injuredRight, injuredLeft } = parseInjury(injCol);
 
-        const srRight = trim(
+        const rawVals = Object.values(raw || {});
+
+        let srRight = trim(
           gv(
             r,
             "starting rank rh",
@@ -517,7 +528,7 @@ export default function App() {
             "right rank"
           )
         );
-        const srLeft = trim(
+        let srLeft = trim(
           gv(
             r,
             "starting rank lh",
@@ -532,6 +543,17 @@ export default function App() {
           )
         );
         const srSingle = trim(gv(r, "starting rank", "current_rank"));
+
+        // The Sydney Players sheet has the arm starting ranks in columns F and G.
+        // Google/Papa can rename duplicate-looking CSV headers, so use the physical
+        // column values as a robust fallback when an explicit RH/LH header was not
+        // found. F = Right, G = Left.
+        if (!srRight && rawVals.length > 5) srRight = trim(rawVals[5]);
+        if (!srLeft && rawVals.length > 6) srLeft = trim(rawVals[6]);
+
+        // Legacy one-column sheets remain supported if F/G are unavailable.
+        if (!srRight) srRight = srSingle;
+        if (!srLeft) srLeft = srSingle;
 
         if (!rawId && !nm && !wc) {
           const vals = Object.values(raw || {});
@@ -561,8 +583,8 @@ export default function App() {
           _playerRowIndex: idx,
           injuredRight,
           injuredLeft,
-          current_rank_rh: srRight || srSingle || "",
-          current_rank_lh: srLeft || srSingle || "",
+          current_rank_rh: srRight || "",
+          current_rank_lh: srLeft || "",
           current_rank: srSingle || "",
         };
       });
