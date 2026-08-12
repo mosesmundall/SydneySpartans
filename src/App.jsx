@@ -18,8 +18,11 @@ const ARMS = ["Right", "Left"];
 /**
  * Display order:
  * - Open classes first (heavy -> light)
+ * - Then Women
  * - Then Youth
- * - Women at the very bottom
+ *
+ * Display order is intentionally independent of eligibility. Women and Youth
+ * remain parallel special categories and never qualify for each other.
  */
 const DISPLAY_CLASSES = [
   ...ORDER_GROUPS
@@ -84,6 +87,7 @@ const yes = (x) => ["true", "yes", "y", "1"].includes(trim(x).toLowerCase());
 async function fetchCsv(url) {
   const bust = url.includes("?") ? "&t=" + Date.now() : "?t=" + Date.now();
   const res = await fetch(url + bust, { cache: "no-store" });
+  if (!res.ok) throw new Error(`Sheet request failed (${res.status})`);
   const text = await res.text();
   return new Promise((resolve, reject) =>
     Papa.parse(text, {
@@ -306,17 +310,23 @@ function applyMatchToLadder(ladder, match) {
 function computeLaddersThroughDate(players, matches, displayClasses, cutoff) {
   const ladders = seedLadders(players, displayClasses);
 
-  // Track positive events separately (robust badges)
-  const lastEventMap = new Map(); // winner's last positive event (takeover/defense)
-  const lastJumpMap = new Map(); // winner's last takeover jump size
-  const lastTakeoverMap = new Map(); // key -> Date
-  const lastDefenseMap = new Map(); // key -> Date
+  // Track positive events separately (robust badges + UI activity/history).
+  const lastEventMap = new Map();
+  const lastJumpMap = new Map();
+  const lastTakeoverMap = new Map();
+  const lastDefenseMap = new Map();
+  const lastLadderActivityMap = new Map();
+  const eventLog = [];
 
   const laddersForArm = (arm) =>
     Object.keys(ladders).filter((wc) => wc.endsWith(` ${arm}`));
 
   matches
-    .map((m) => ({ ...m, _t: parseDateTimeUTC(m._dateTime)?.getTime() ?? 0 }))
+    .map((m) => {
+      const parsed = parseDateTimeUTC(m._dateTime);
+      return parsed ? { ...m, _t: parsed.getTime() } : null;
+    })
+    .filter(Boolean)
     .sort((a, b) => {
       if (a._t !== b._t) return a._t - b._t;
       if ((a._seq ?? Infinity) !== (b._seq ?? Infinity))
@@ -330,7 +340,7 @@ function computeLaddersThroughDate(players, matches, displayClasses, cutoff) {
       return a._stableKey.localeCompare(b._stableKey);
     })
     .forEach((m) => {
-      const when = new Date(m._t || 0);
+      const when = new Date(m._t);
       if (!m.arm) return;
       if (cutoff && when > cutoff) return;
 
@@ -347,7 +357,20 @@ function computeLaddersThroughDate(players, matches, displayClasses, cutoff) {
         ladders[wc] = newLadder;
 
         events.forEach((e) => {
+          // Log all real ladder events, even when the visual badge is suppressed.
+          const logged = {
+            ...e,
+            wc,
+            arm: m.arm,
+            when,
+            matchKey: m._stableKey,
+            matchWeightClass: m.weight_class,
+          };
+          eventLog.push(logged);
+          lastLadderActivityMap.set(wc, when);
+
           if (m._badgeSuppressed) return;
+
           const wk = `${wc}:${e.winner_id}`;
           if (e.type === "defense") {
             lastEventMap.set(wk, { type: "defense", when });
@@ -376,157 +399,226 @@ function computeLaddersThroughDate(players, matches, displayClasses, cutoff) {
     lastJumpMap,
     lastTakeoverMap,
     lastDefenseMap,
+    lastLadderActivityMap,
+    eventLog,
   };
+}
+
+/* ===================== PRESENTATION HELPERS ===================== */
+const prettyClassLabel = (wc) =>
+  String(wc || "")
+    .replace(/^u60kg\b/i, "Women")
+    .replace(/^youth\b/i, "Youth")
+    .replace(/^u70kg\b/i, "U70 kg")
+    .replace(/^u80kg\b/i, "U80 kg")
+    .replace(/^u90kg\b/i, "U90 kg")
+    .replace(/^u100kg\b/i, "U100 kg")
+    .replace(/^100kg\+\b/i, "100 kg+");
+
+const prettyBaseLabel = (base) => {
+  const t = String(base || "").trim();
+  if (/^(women|woman|u60kg)$/i.test(t)) return "Women";
+  if (/^youth$/i.test(t)) return "Youth";
+  return prettyClassLabel(t);
+};
+
+const classWithoutArm = (wc) =>
+  prettyClassLabel(String(wc || "").replace(/\s+(Right|Left)$/i, ""));
+
+function formatDateAU(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-AU", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(date);
+}
+
+function formatTimeLocal(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-AU", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function uniqueBy(items, keyFn) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const k = keyFn(item);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
 
 /* ===================== APP ===================== */
 export default function App() {
   const [players, setPlayers] = useState([]);
   const [matches, setMatches] = useState([]);
-
   const [windowDays, setWindowDays] = useState(CONFIG.defaultWindowDays);
   const [showBadges, setShowBadges] = useState(true);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [armFilter, setArmFilter] = useState("All");
+  const [selectedPlayerId, setSelectedPlayerId] = useState(null);
+  const [showActivity, setShowActivity] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [liveActive, setLiveActive] = useState(false);
   const liveTimer = useRef(null);
 
-  async function loadAll() {
-    const pRows = await fetchCsv(csvUrl(CONFIG.sheets.players));
-    const mRows = await fetchCsv(csvUrl(CONFIG.sheets.matches));
+  async function loadAll(quiet = false) {
+    if (!quiet) setLoading(true);
+    setError("");
 
-    /* ---- Players ---- */
-    const p = pRows.map((raw, idx) => {
-      const r = normalizeRow(raw);
-      let rawId = trim(gv(r, "id", "player id", "player_id"));
-      let nm = trim(gv(r, "name", "display name", "display_name"));
-      let wc = trim(gv(r, "weight class", "weight_class"));
-      let act =
-        trim(gv(r, "active", "currently active?", "currently active")) || "true";
+    try {
+      const [pRows, mRows] = await Promise.all([
+        fetchCsv(csvUrl(CONFIG.sheets.players)),
+        fetchCsv(csvUrl(CONFIG.sheets.matches)),
+      ]);
 
-      // Injured? column
-      const injCol = trim(gv(r, "injured?", "injured", "injury"));
-      const { injuredRight, injuredLeft } = parseInjury(injCol);
-
-      // arm-specific starting ranks + legacy fallback
-      const srRight = trim(
-        gv(
-          r,
-          "starting rank rh",
-          "starting rank right",
-          "starting rank (right)",
-          "start rh",
-          "start_right",
-          "start right",
-          "rh rank",
-          "rank rh",
-          "right rank"
-        )
-      );
-      const srLeft = trim(
-        gv(
-          r,
-          "starting rank lh",
-          "starting rank left",
-          "starting rank (left)",
-          "start lh",
-          "start_left",
-          "start left",
-          "lh rank",
-          "rank lh",
-          "left rank"
-        )
-      );
-      const srSingle = trim(gv(r, "starting rank", "current_rank"));
-
-      if (!rawId && !nm && !wc) {
-        const vals = Object.values(raw || {});
-        rawId = trim(vals[0]);
-        nm = trim(vals[1]) || rawId;
-        wc = trim(vals[2]);
-        act = trim(vals[3] ?? "true");
-      }
-
-      const safeId =
-        rawId ||
-        (nm
-          ? nm
-              .toLowerCase()
-              .replace(/[^a-z0-9]+/g, "_")
-              .replace(/^_|_$/g, "")
-          : "") ||
-        `anon_${idx}`;
-
-      return {
-        id: safeId,
-        name: nm || safeId,
-        weight_class: wc,
-        active: yes(act),
-
-        injuredRight,
-        injuredLeft,
-
-        current_rank_rh: srRight || srSingle || "",
-        current_rank_lh: srLeft || srSingle || "",
-        current_rank: srSingle || "",
-      };
-    });
-
-    /* ---- Matches (deterministic + Badge? support) ---- */
-    const m = mRows
-      .map((raw, rowIndex) => {
+      /* ---- Players ---- */
+      const p = pRows.map((raw, idx) => {
         const r = normalizeRow(raw);
-        let date = trim(gv(r, "date", "DATE"));
-        let time = trim(gv(r, "time", "timestamp", "datetime"));
-        let seqStr = trim(gv(r, "seq", "order", "sequence"));
-        let seq = seqStr && !isNaN(+seqStr) ? +seqStr : undefined;
-
+        let rawId = trim(gv(r, "id", "player id", "player_id"));
+        let nm = trim(gv(r, "name", "display name", "display_name"));
         let wc = trim(gv(r, "weight class", "weight_class"));
-        let win = trim(gv(r, "winner id", "winner_id"));
-        let lose = trim(gv(r, "loser id", "loser_id", "looser id", "looser_id"));
-        let arm = trim(gv(r, "arm?", "arm")).toLowerCase();
+        let act =
+          trim(gv(r, "active", "currently active?", "currently active")) || "true";
 
-        const badgeCol = trim(gv(r, "badge?", "badge"));
-        const badgeSuppressed = badgeCol !== "" && !yes(badgeCol);
+        const injCol = trim(gv(r, "injured?", "injured", "injury"));
+        const { injuredRight, injuredLeft } = parseInjury(injCol);
 
-        if (!date && !win && !lose) {
+        const srRight = trim(
+          gv(
+            r,
+            "starting rank rh",
+            "starting rank right",
+            "starting rank (right)",
+            "start rh",
+            "start_right",
+            "start right",
+            "rh rank",
+            "rank rh",
+            "right rank"
+          )
+        );
+        const srLeft = trim(
+          gv(
+            r,
+            "starting rank lh",
+            "starting rank left",
+            "starting rank (left)",
+            "start lh",
+            "start_left",
+            "start left",
+            "lh rank",
+            "rank lh",
+            "left rank"
+          )
+        );
+        const srSingle = trim(gv(r, "starting rank", "current_rank"));
+
+        if (!rawId && !nm && !wc) {
           const vals = Object.values(raw || {});
-          date = trim(vals[0]);
-          wc = trim(vals[1]);
-          win = trim(vals[2]);
-          lose = trim(vals[3]);
-          arm = trim((vals[4] ?? "").toLowerCase());
+          rawId = trim(vals[0]);
+          nm = trim(vals[1]) || rawId;
+          wc = trim(vals[2]);
+          act = trim(vals[3] ?? "true");
         }
 
-        arm = arm.startsWith("l") ? "Left" : arm.startsWith("r") ? "Right" : "";
-
-        const dt = time ? `${date} ${time}` : date;
-        const dtParsed = parseDateTimeUTC(dt);
-
-        const stableKey = [
-          dtParsed ? dtParsed.toISOString() : "na",
-          win,
-          lose,
-          arm,
-          wc,
-          String(seq ?? ""),
-          String(rowIndex),
-        ].join("|");
+        const safeId =
+          rawId ||
+          (nm
+            ? nm
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, "_")
+                .replace(/^_|_$/g, "")
+            : "") ||
+          `anon_${idx}`;
 
         return {
-          date,
-          _dateTime: dt,
-          _seq: seq,
-          _rowIndex: rowIndex,
-          _stableKey: stableKey,
+          id: safeId,
+          name: nm || safeId,
           weight_class: wc,
-          winner_id: win,
-          loser_id: lose,
-          arm,
-          _badgeSuppressed: badgeSuppressed,
+          active: yes(act),
+          injuredRight,
+          injuredLeft,
+          current_rank_rh: srRight || srSingle || "",
+          current_rank_lh: srLeft || srSingle || "",
+          current_rank: srSingle || "",
         };
-      })
-      .filter((x) => x.date && x.arm);
+      });
 
-    setPlayers(p);
-    setMatches(m);
+      /* ---- Matches (deterministic + Badge? support) ---- */
+      const m = mRows
+        .map((raw, rowIndex) => {
+          const r = normalizeRow(raw);
+          let date = trim(gv(r, "date", "DATE"));
+          let time = trim(gv(r, "time", "timestamp", "datetime"));
+          let seqStr = trim(gv(r, "seq", "order", "sequence"));
+          let seq = seqStr && !isNaN(+seqStr) ? +seqStr : undefined;
+
+          let wc = trim(gv(r, "weight class", "weight_class"));
+          let win = trim(gv(r, "winner id", "winner_id"));
+          let lose = trim(gv(r, "loser id", "loser_id", "looser id", "looser_id"));
+          let arm = trim(gv(r, "arm?", "arm")).toLowerCase();
+
+          const badgeCol = trim(gv(r, "badge?", "badge"));
+          const badgeSuppressed = badgeCol !== "" && !yes(badgeCol);
+
+          if (!date && !win && !lose) {
+            const vals = Object.values(raw || {});
+            date = trim(vals[0]);
+            wc = trim(vals[1]);
+            win = trim(vals[2]);
+            lose = trim(vals[3]);
+            arm = trim((vals[4] ?? "").toLowerCase());
+          }
+
+          arm = arm.startsWith("l") ? "Left" : arm.startsWith("r") ? "Right" : "";
+
+          const dt = time ? `${date} ${time}` : date;
+          const dtParsed = parseDateTimeUTC(dt);
+
+          const stableKey = [
+            dtParsed ? dtParsed.toISOString() : "na",
+            win,
+            lose,
+            arm,
+            wc,
+            String(seq ?? ""),
+            String(rowIndex),
+          ].join("|");
+
+          return {
+            date,
+            _dateTime: dt,
+            _seq: seq,
+            _rowIndex: rowIndex,
+            _stableKey: stableKey,
+            _parsedDate: dtParsed,
+            _invalidDate: Boolean(date) && !dtParsed,
+            weight_class: wc,
+            winner_id: win,
+            loser_id: lose,
+            arm,
+            _badgeSuppressed: badgeSuppressed,
+          };
+        })
+        .filter((x) => x.date && x.arm && x.winner_id && x.loser_id);
+
+      setPlayers(p);
+      setMatches(m);
+      setLastUpdated(new Date());
+    } catch (e) {
+      console.error(e);
+      setError(e?.message || "Could not load rankings data.");
+    } finally {
+      if (!quiet) setLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -537,235 +629,691 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Compute current ladders and window
+  useEffect(() => {
+    if (!selectedPlayerId) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape") setSelectedPlayerId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedPlayerId]);
+
+  // Compute current ladders and the historical comparison window.
   const { nowData, pastData, cutoff } = useMemo(() => {
-    const cutoff = new Date();
-    cutoff.setHours(0, 0, 0, 0); // normalize to start-of-day for comparisons
-    cutoff.setDate(cutoff.getDate() - (showBadges ? windowDays : 36500));
-    const past = computeLaddersThroughDate(players, matches, CONFIG.weightClasses, cutoff);
+    const cutoffDate = new Date();
+    cutoffDate.setHours(0, 0, 0, 0);
+    cutoffDate.setDate(cutoffDate.getDate() - (showBadges ? windowDays : 36500));
+    const past = computeLaddersThroughDate(players, matches, CONFIG.weightClasses, cutoffDate);
     const now = computeLaddersThroughDate(players, matches, CONFIG.weightClasses, null);
-    return { nowData: now, pastData: past, cutoff };
+    return { nowData: now, pastData: past, cutoff: cutoffDate };
   }, [players, matches, windowDays, showBadges]);
 
-  const lastEventAt = (wc, id) => nowData.lastEventMap.get(`${wc}:${id}`) || null; // kept for compatibility
-  const limitFor = () => 15;
+  const playerById = useMemo(
+    () => new Map(players.map((p) => [p.id, p])),
+    [players]
+  );
 
-  /* ---------- UI helpers / style ---------- */
+  const ranksByPlayer = useMemo(() => {
+    const map = new Map();
+    Object.entries(nowData.ladders || {}).forEach(([wc, ladder]) => {
+      ladder.forEach((p) => {
+        if (!map.has(p.id)) map.set(p.id, []);
+        map.get(p.id).push({ wc, rank: p.rank });
+      });
+    });
+    map.forEach((arr) =>
+      arr.sort((a, b) => {
+        const armCmp = a.wc.endsWith(" Right") === b.wc.endsWith(" Right") ? 0 : a.wc.endsWith(" Right") ? -1 : 1;
+        if (armCmp) return armCmp;
+        return CONFIG.weightClasses.indexOf(a.wc) - CONFIG.weightClasses.indexOf(b.wc);
+      })
+    );
+    return map;
+  }, [nowData.ladders]);
+
+  const sortedMatches = useMemo(
+    () =>
+      matches
+        .filter((m) => m._parsedDate)
+        .slice()
+        .sort((a, b) => {
+          const at = a._parsedDate.getTime();
+          const bt = b._parsedDate.getTime();
+          if (at !== bt) return at - bt;
+          if ((a._seq ?? Infinity) !== (b._seq ?? Infinity))
+            return (a._seq ?? Infinity) - (b._seq ?? Infinity);
+          return (a._rowIndex ?? 0) - (b._rowIndex ?? 0);
+        }),
+    [matches]
+  );
+
+  const playerStats = useMemo(() => {
+    const map = new Map();
+    players.forEach((p) =>
+      map.set(p.id, {
+        wins: 0,
+        losses: 0,
+        rightWins: 0,
+        rightLosses: 0,
+        leftWins: 0,
+        leftLosses: 0,
+        currentStreak: 0,
+        bestStreak: 0,
+        history: [],
+        takeoverKeys: new Set(),
+        defenseKeys: new Set(),
+        biggestJump: 0,
+      })
+    );
+
+    sortedMatches.forEach((m) => {
+      const w = map.get(m.winner_id);
+      const l = map.get(m.loser_id);
+
+      if (w) {
+        w.wins += 1;
+        if (m.arm === "Right") w.rightWins += 1;
+        if (m.arm === "Left") w.leftWins += 1;
+        w.currentStreak += 1;
+        w.bestStreak = Math.max(w.bestStreak, w.currentStreak);
+        w.history.push({ ...m, result: "W", opponentId: m.loser_id });
+      }
+      if (l) {
+        l.losses += 1;
+        if (m.arm === "Right") l.rightLosses += 1;
+        if (m.arm === "Left") l.leftLosses += 1;
+        l.currentStreak = 0;
+        l.history.push({ ...m, result: "L", opponentId: m.winner_id });
+      }
+    });
+
+    (nowData.eventLog || []).forEach((e) => {
+      const s = map.get(e.winner_id);
+      if (!s) return;
+      if (e.type === "takeover") {
+        s.takeoverKeys.add(e.matchKey);
+        s.biggestJump = Math.max(s.biggestJump, e.jump || 0);
+      }
+      if (e.type === "defense") s.defenseKeys.add(e.matchKey);
+    });
+
+    return map;
+  }, [players, sortedMatches, nowData.eventLog]);
+
+  // One activity item per match/event type, aggregating every ladder affected by that win.
+  const rankActivity = useMemo(() => {
+    const grouped = new Map();
+    (nowData.eventLog || []).forEach((e) => {
+      const k = `${e.matchKey}:${e.type}:${e.winner_id}:${e.loser_id}`;
+      if (!grouped.has(k)) {
+        grouped.set(k, {
+          ...e,
+          classes: [],
+          maxJump: 0,
+        });
+      }
+      const item = grouped.get(k);
+      item.classes.push(e.wc);
+      item.maxJump = Math.max(item.maxJump, e.jump || 0);
+    });
+
+    return Array.from(grouped.values())
+      .map((item) => ({
+        ...item,
+        classes: uniqueBy(item.classes, (x) => x),
+      }))
+      .sort((a, b) => b.when.getTime() - a.when.getTime());
+  }, [nowData.eventLog]);
+
+  const visibleClasses = useMemo(
+    () =>
+      CONFIG.weightClasses.filter(
+        (wc) => armFilter === "All" || wc.endsWith(` ${armFilter}`)
+      ),
+    [armFilter]
+  );
+
+  const activePlayers = players.filter((p) => p.active);
+  const uniqueChampions = useMemo(() => {
+    const ids = new Set();
+    Object.values(nowData.ladders || {}).forEach((ladder) => {
+      if (ladder?.[0]?.id) ids.add(ladder[0].id);
+    });
+    return ids.size;
+  }, [nowData.ladders]);
+
+  const invalidDateCount = matches.filter((m) => m._invalidDate).length;
+  const selectedPlayer = selectedPlayerId ? playerById.get(selectedPlayerId) : null;
+  const selectedRanks = selectedPlayer ? ranksByPlayer.get(selectedPlayer.id) || [] : [];
+  const selectedStats = selectedPlayer ? playerStats.get(selectedPlayer.id) : null;
+  const selectedChampionCount = selectedRanks.filter((r) => r.rank === 1).length;
+  const selectedRecentHistory = selectedStats
+    ? selectedStats.history.slice().reverse().slice(0, 8)
+    : [];
+
   const gold = "#f5c542";
+  const green = "#34d399";
+  const red = "#fb7185";
   const bgOverlay = CONFIG.branding.backgroundImage
-    ? `linear-gradient(180deg, rgba(9,12,24,.85) 0%, rgba(9,12,24,.85) 60%, rgba(9,12,24,.9) 100%), url(${CONFIG.branding.backgroundImage})`
-    : "#0b132b";
-
-  const prettyClassLabel = (wc) =>
-    wc.replace(/^u60kg\b/i, "Women").replace(/^youth\b/i, "Youth");
+    ? `linear-gradient(180deg, rgba(5,8,18,.82) 0%, rgba(7,11,25,.9) 58%, rgba(5,8,18,.96) 100%), url(${CONFIG.branding.backgroundImage})`
+    : "#070b19";
 
   const pageStyle = {
     minHeight: "100vh",
     background: bgOverlay,
     color: "white",
-    padding: 20,
-    fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
+    padding: "clamp(14px, 2vw, 26px)",
+    fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
     backgroundSize: "cover",
     backgroundPosition: "center",
+    backgroundAttachment: "fixed",
   };
-  const headerStyle = {
-    display: "flex",
-    alignItems: "center",
-    gap: 12,
-    marginBottom: 12,
-    flexWrap: "wrap",
+
+  const glass = {
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "linear-gradient(180deg, rgba(255,255,255,.085), rgba(255,255,255,.045))",
+    boxShadow: "0 18px 55px rgba(0,0,0,.28)",
+    backdropFilter: "blur(14px)",
   };
+
   const button = {
-    padding: "8px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,.18)",
-    background: "rgba(255,255,255,.06)",
+    padding: "9px 12px",
+    borderRadius: 11,
+    border: "1px solid rgba(255,255,255,.16)",
+    background: "rgba(255,255,255,.07)",
     color: "white",
     cursor: "pointer",
-    backdropFilter: "blur(6px)",
+    fontWeight: 700,
+    fontSize: 13,
+    transition: "transform .18s ease, background .18s ease, border-color .18s ease",
   };
+
   const pill = {
-    padding: "4px 8px",
+    padding: "5px 9px",
     borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.15)",
-    background: "rgba(255,255,255,.06)",
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.055)",
     fontSize: 12,
   };
-  const gridStyle = {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-    gap: 20,
-  };
-  const cardStyle = {
-    borderRadius: 20,
-    border: "1px solid rgba(255,255,255,.15)",
-    background: "rgba(255,255,255,.06)",
-    boxShadow: "0 8px 30px rgba(0,0,0,.35)",
-    overflow: "hidden",
-  };
-  const sectionHead = {
-    padding: "12px 14px",
-    borderBottom: "1px solid rgba(255,255,255,.12)",
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-  };
-  const champWrap = { marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 };
-  const champImg = {
-    width: CONFIG.photos.size,
-    height: CONFIG.photos.size,
-    borderRadius: "50%",
-    objectFit: "cover",
-    border: CONFIG.photos.ring ? "2px solid rgba(255,255,255,.65)" : "none",
-    boxShadow: "0 0 0 3px rgba(255,255,255,.12)",
-  };
-  const rowStyle = { display: "flex", gap: 12, padding: "10px 12px", alignItems: "center" };
-  const rankStyle = { width: 28, textAlign: "center", fontWeight: 800, opacity: 0.95 };
-  const nameStyle = { fontWeight: 700, letterSpacing: 0.2 };
-  const subStyle = { fontSize: 12, opacity: 0.85 };
 
-  function startLiveMinute() {
-    if (liveTimer.current) clearInterval(liveTimer.current);
-    let ticks = 0;
-    liveTimer.current = setInterval(async () => {
-      ticks++;
-      await loadAll();
-      if (ticks >= 30) {
-        clearInterval(liveTimer.current);
-        liveTimer.current = null;
-      }
-    }, CONFIG.livePollMs);
-  }
+  const statCard = {
+    ...glass,
+    borderRadius: 16,
+    padding: "12px 14px",
+    minWidth: 130,
+    flex: "1 1 130px",
+  };
+
+  const cardStyle = {
+    ...glass,
+    borderRadius: 20,
+    overflow: "hidden",
+    minWidth: 0,
+  };
 
   function photoForPlayer(id) {
     return CONFIG.photos.byPlayerId[id] || "";
   }
 
+  function startLiveMinute() {
+    if (liveTimer.current) clearInterval(liveTimer.current);
+    setLiveActive(true);
+    let ticks = 0;
+    loadAll(true);
+    liveTimer.current = setInterval(async () => {
+      ticks += 1;
+      await loadAll(true);
+      if (ticks >= 30) {
+        clearInterval(liveTimer.current);
+        liveTimer.current = null;
+        setLiveActive(false);
+      }
+    }, CONFIG.livePollMs);
+  }
+
+  const searchLower = searchTerm.trim().toLowerCase();
+
   return (
     <div style={pageStyle}>
-      <div style={headerStyle}>
-        {CONFIG.branding.logoUrl && (
-          <img
-            src={CONFIG.branding.logoUrl}
-            alt="logo"
-            width={60}
-            height={60}
-            style={{ borderRadius: 14, boxShadow: "0 8px 24px rgba(0,0,0,.35)" }}
-          />
-        )}
-        <div>
-          <h1 style={{ fontSize: 30, fontWeight: 900, margin: 0, letterSpacing: 0.3 }}>
-            {CONFIG.branding.clubName} – Rankings
-          </h1>
-          <div style={{ marginTop: 4, opacity: 0.85, fontSize: 13 }}>
-            active members only • competitive rankings • instant updates
+      <style>{`
+        * { box-sizing: border-box; }
+        button, input { font: inherit; }
+        .rank-shell { max-width: 1680px; margin: 0 auto; }
+        .topbar { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:14px; }
+        .brand-logo { width:64px; height:64px; border-radius:16px; object-fit:cover; box-shadow:0 12px 35px rgba(0,0,0,.35); }
+        .toolbar { margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+        .control:hover { transform:translateY(-1px); background:rgba(255,255,255,.11)!important; border-color:rgba(255,255,255,.25)!important; }
+        .arm-btn.active { background:rgba(245,197,66,.15)!important; border-color:rgba(245,197,66,.55)!important; color:#ffe792!important; }
+        .rank-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:18px; align-items:start; }
+        .rank-card { animation:cardIn .42s ease both; transition:transform .2s ease, border-color .2s ease, box-shadow .2s ease; }
+        .rank-card:hover { transform:translateY(-2px); border-color:rgba(255,255,255,.2)!important; box-shadow:0 22px 65px rgba(0,0,0,.34)!important; }
+        .rank-row { position:relative; display:flex; gap:12px; padding:10px 12px; align-items:center; border-radius:13px; cursor:pointer; transition:transform .18s ease, background .18s ease, box-shadow .18s ease; }
+        .rank-row + .rank-row { margin-top:2px; }
+        .rank-row:hover { transform:translateX(3px); background:rgba(255,255,255,.075); }
+        .rank-row.champion { background:linear-gradient(90deg,rgba(245,197,66,.14),rgba(245,197,66,.035)); border:1px solid rgba(245,197,66,.18); }
+        .rank-row.recent { animation:recentGlow 1.15s ease-out both; }
+        .rank-num { width:32px; height:32px; display:grid; place-items:center; border-radius:10px; font-weight:900; background:rgba(255,255,255,.055); flex:0 0 32px; }
+        .rank-row.champion .rank-num { color:#ffe792; background:rgba(245,197,66,.13); }
+        .champ-photo { width:66px; height:66px; border-radius:50%; object-fit:cover; border:2px solid rgba(245,197,66,.88); box-shadow:0 0 0 4px rgba(245,197,66,.10), 0 8px 25px rgba(0,0,0,.32); }
+        .activity-item { display:grid; grid-template-columns:34px 1fr auto; gap:10px; align-items:start; padding:10px 0; }
+        .activity-item + .activity-item { border-top:1px solid rgba(255,255,255,.08); }
+        .drawer-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.58); z-index:50; animation:fadeIn .16s ease both; }
+        .player-drawer { position:absolute; top:0; right:0; width:min(460px,94vw); min-height:100%; background:linear-gradient(180deg,#11182c,#0a1020); border-left:1px solid rgba(255,255,255,.12); padding:20px; box-shadow:-20px 0 70px rgba(0,0,0,.48); animation:drawerIn .24s ease both; }
+        .drawer-rank { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:9px 11px; border-radius:11px; background:rgba(255,255,255,.05); }
+        .drawer-rank + .drawer-rank { margin-top:6px; }
+        .search-input::placeholder { color:rgba(255,255,255,.48); }
+        .search-input:focus { outline:none; border-color:rgba(245,197,66,.5)!important; box-shadow:0 0 0 3px rgba(245,197,66,.08); }
+        @keyframes cardIn { from { opacity:0; transform:translateY(9px); } to { opacity:1; transform:none; } }
+        @keyframes recentGlow { 0% { box-shadow:inset 0 0 0 1px rgba(52,211,153,.55), 0 0 24px rgba(52,211,153,.14); } 100% { box-shadow:none; } }
+        @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
+        @keyframes drawerIn { from { opacity:0; transform:translateX(32px); } to { opacity:1; transform:none; } }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.001ms!important; animation-iteration-count:1!important; transition-duration:.001ms!important; } }
+        @media (max-width: 760px) {
+          .rank-grid { grid-template-columns:1fr; gap:14px; }
+          .toolbar { margin-left:0; width:100%; }
+          .toolbar > * { flex:1 1 auto; }
+          .brand-logo { width:54px; height:54px; }
+          .desktop-subtitle { font-size:12px!important; }
+          .activity-layout { grid-template-columns:1fr!important; }
+        }
+      `}</style>
+
+      <div className="rank-shell">
+        <div className="topbar">
+          {CONFIG.branding.logoUrl && (
+            <img src={CONFIG.branding.logoUrl} alt="logo" className="brand-logo" />
+          )}
+
+          <div style={{ minWidth: 220 }}>
+            <div style={{ display: "flex", gap: 9, alignItems: "center", flexWrap: "wrap" }}>
+              <h1 style={{ fontSize: "clamp(25px,3vw,34px)", fontWeight: 950, margin: 0, letterSpacing: -0.7 }}>
+                {CONFIG.branding.clubName}
+              </h1>
+              <span style={{ ...pill, color: "#ffe792", borderColor: "rgba(245,197,66,.3)" }}>RANKINGS</span>
+            </div>
+            <div className="desktop-subtitle" style={{ marginTop: 3, opacity: 0.72, fontSize: 13 }}>
+              competitive ladder • cross-class challenges • live from Google Sheets
+            </div>
+          </div>
+
+          <div className="toolbar">
+            <button className="control" style={button} onClick={() => loadAll()} disabled={loading}>
+              {loading ? "Refreshing…" : "↻ Refresh"}
+            </button>
+            <button
+              className="control"
+              style={{ ...button, borderColor: liveActive ? "rgba(52,211,153,.55)" : button.border }}
+              onClick={startLiveMinute}
+            >
+              <span style={{ color: liveActive ? green : "inherit" }}>●</span> {liveActive ? "Live" : "Live 1 min"}
+            </button>
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 8, marginLeft: "auto", alignItems: "center", flexWrap: "wrap" }}>
-          <button style={button} onClick={loadAll}>Refresh now</button>
-          <button style={button} onClick={startLiveMinute}>Live (1 min)</button>
-          <span style={pill}>
-            <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <input type="checkbox" checked={showBadges} onChange={(e) => setShowBadges(e.target.checked)} />
-              Show badges
-            </label>
-          </span>
-          <span style={pill}>
-            Recent window:
+        {error && (
+          <div style={{ ...glass, borderRadius: 14, padding: 12, marginBottom: 14, borderColor: "rgba(251,113,133,.45)", color: "#fecdd3" }}>
+            <strong>Couldn’t refresh:</strong> {error}
+          </div>
+        )}
+
+        {invalidDateCount > 0 && (
+          <div style={{ ...glass, borderRadius: 14, padding: 12, marginBottom: 14, borderColor: "rgba(251,191,36,.4)", color: "#fde68a" }}>
+            {invalidDateCount} match {invalidDateCount === 1 ? "row has" : "rows have"} an invalid date and {invalidDateCount === 1 ? "is" : "are"} being ignored. Use DD/MM/YYYY.
+          </div>
+        )}
+
+        {/* Headline stats */}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+          <div style={statCard}>
+            <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Active members</div>
+            <div style={{ fontSize: 24, fontWeight: 900, marginTop: 2 }}>{activePlayers.length}</div>
+          </div>
+          <div style={statCard}>
+            <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Recorded matches</div>
+            <div style={{ fontSize: 24, fontWeight: 900, marginTop: 2 }}>{sortedMatches.length}</div>
+          </div>
+          <div style={statCard}>
+            <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Current champions</div>
+            <div style={{ fontSize: 24, fontWeight: 900, marginTop: 2 }}>{uniqueChampions}</div>
+          </div>
+          <div style={statCard}>
+            <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Last refreshed</div>
+            <div style={{ fontSize: 18, fontWeight: 850, marginTop: 5 }}>{lastUpdated ? formatTimeLocal(lastUpdated) : "—"}</div>
+          </div>
+        </div>
+
+        {/* Controls */}
+        <div style={{ ...glass, borderRadius: 16, padding: 10, marginBottom: 14, display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+          <input
+            className="search-input"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            placeholder="Search a competitor…"
+            style={{
+              minWidth: 210,
+              flex: "1 1 250px",
+              padding: "9px 11px",
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,.14)",
+              background: "rgba(0,0,0,.18)",
+              color: "white",
+              transition: "border-color .18s ease, box-shadow .18s ease",
+            }}
+          />
+
+          <div style={{ display: "flex", gap: 6 }}>
+            {["All", "Right", "Left"].map((arm) => (
+              <button
+                key={arm}
+                className={`control arm-btn ${armFilter === arm ? "active" : ""}`}
+                style={button}
+                onClick={() => setArmFilter(arm)}
+              >
+                {arm}
+              </button>
+            ))}
+          </div>
+
+          <label style={{ ...pill, display: "inline-flex", gap: 7, alignItems: "center" }}>
+            <input type="checkbox" checked={showBadges} onChange={(e) => setShowBadges(e.target.checked)} />
+            Recent badges
+          </label>
+
+          <label style={{ ...pill, display: "inline-flex", gap: 6, alignItems: "center" }}>
+            Window
             <input
               type="number"
               min={0}
               value={windowDays}
               onChange={(e) => setWindowDays(Math.max(0, parseInt(e.target.value || "0", 10)))}
               style={{
-                width: 64,
-                marginLeft: 6,
-                padding: "4px 8px",
-                borderRadius: 8,
-                border: "1px solid rgba(255,255,255,.2)",
-                background: "rgba(255,255,255,.06)",
+                width: 54,
+                padding: "3px 5px",
+                borderRadius: 7,
+                border: "1px solid rgba(255,255,255,.15)",
+                background: "rgba(0,0,0,.18)",
                 color: "white",
               }}
-            />{" "}
+            />
             days
-          </span>
+          </label>
+        </div>
+
+        {/* Legend */}
+        <div style={{ marginBottom: 14, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", opacity: 0.92 }}>
+          <span style={pill}><span style={{ color: gold }}>★</span> takeover</span>
+          <span style={pill}>🛡️ defense</span>
+          <span style={pill}><span style={{ color: green }}>↑</span> moved up</span>
+          <span style={pill}><span style={{ color: red }}>↓</span> displaced</span>
+          <span style={{ opacity: 0.55, fontSize: 11 }}>Click any competitor for full details.</span>
+        </div>
+
+        {/* Recent ladder activity */}
+        <section style={{ ...cardStyle, marginBottom: 18 }}>
+          <button
+            onClick={() => setShowActivity((v) => !v)}
+            style={{
+              width: "100%",
+              border: 0,
+              background: "transparent",
+              color: "white",
+              padding: "13px 15px",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              textAlign: "left",
+            }}
+          >
+            <div>
+              <div style={{ fontWeight: 850 }}>Recent ladder activity</div>
+              <div style={{ fontSize: 11, opacity: 0.58, marginTop: 2 }}>Takeovers and successful defenses across every affected class</div>
+            </div>
+            <span style={{ opacity: 0.65 }}>{showActivity ? "Hide ▲" : "Show ▼"}</span>
+          </button>
+
+          {showActivity && (
+            <div style={{ padding: "0 15px 12px" }}>
+              {rankActivity.length === 0 ? (
+                <div style={{ padding: "12px 0", opacity: 0.6 }}>No ladder activity recorded yet.</div>
+              ) : (
+                rankActivity.slice(0, 6).map((item) => {
+                  const winner = playerById.get(item.winner_id);
+                  const loser = playerById.get(item.loser_id);
+                  const affected = item.classes.map(classWithoutArm);
+                  const uniqueAffected = uniqueBy(affected, (x) => x);
+                  return (
+                    <div className="activity-item" key={`${item.matchKey}:${item.type}`}>
+                      <div style={{ width: 30, height: 30, borderRadius: 9, display: "grid", placeItems: "center", background: item.type === "takeover" ? "rgba(245,197,66,.13)" : "rgba(52,211,153,.11)" }}>
+                        {item.type === "takeover" ? <span style={{ color: gold }}>★</span> : "🛡️"}
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 13, lineHeight: 1.45 }}>
+                          <strong>{winner?.name || item.winner_id}</strong>{" "}
+                          {item.type === "takeover" ? "took rank from" : "defended against"}{" "}
+                          <strong>{loser?.name || item.loser_id}</strong>
+                          {item.type === "takeover" && item.maxJump > 0 && (
+                            <span style={{ color: green, fontWeight: 800 }}> · ↑ {item.maxJump}</span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 11, opacity: 0.58, marginTop: 2 }}>
+                          {item.arm} · {uniqueAffected.join(", ")}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 11, opacity: 0.55, whiteSpace: "nowrap" }}>{formatDateAU(item.when)}</div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
+        </section>
+
+        {/* Ranking cards */}
+        <div className="rank-grid">
+          {visibleClasses.map((wc, cardIndex) => {
+            const fullLadder = nowData.ladders[wc] || [];
+            const filtered = searchLower
+              ? fullLadder.filter((p) => p.name.toLowerCase().includes(searchLower))
+              : fullLadder.slice(0, 15);
+            const past = pastData.ladders[wc] || [];
+            const pastRank = new Map(past.map((p) => [p.id, p.rank]));
+            const champion = fullLadder[0];
+            const champPhoto = champion ? photoForPlayer(champion.id) : "";
+            const lastActivity = nowData.lastLadderActivityMap.get(wc) || null;
+
+            return (
+              <section
+                key={wc}
+                className="rank-card"
+                style={{ ...cardStyle, animationDelay: `${Math.min(cardIndex * 35, 280)}ms` }}
+              >
+                <div style={{ padding: "13px 14px", borderBottom: "1px solid rgba(255,255,255,.09)" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 17, fontWeight: 900, letterSpacing: -0.2 }}>{prettyClassLabel(wc)}</div>
+                      <div style={{ fontSize: 10.5, opacity: 0.5, marginTop: 3 }}>
+                        {lastActivity ? `Last activity ${formatDateAU(lastActivity)}` : "No recorded ladder activity"}
+                      </div>
+                    </div>
+
+                    {champion && (
+                      <button
+                        onClick={() => setSelectedPlayerId(champion.id)}
+                        title={`Current #1: ${champion.name}`}
+                        style={{ border: 0, background: "transparent", color: "white", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 9, textAlign: "right" }}
+                      >
+                        <div>
+                          <div style={{ fontSize: 9.5, letterSpacing: 1.1, color: "#ffe792", fontWeight: 850 }}>👑 CHAMPION</div>
+                          <div style={{ fontSize: 13, fontWeight: 850, maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{champion.name}</div>
+                        </div>
+                        {champPhoto ? (
+                          <img src={champPhoto} alt={champion.name} className="champ-photo" />
+                        ) : (
+                          <div className="champ-photo" style={{ display: "grid", placeItems: "center", background: "rgba(255,255,255,.07)", fontSize: 20 }}>👑</div>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div style={{ padding: 8 }}>
+                  {filtered.length === 0 ? (
+                    <div style={{ padding: "18px 12px", opacity: 0.55, textAlign: "center", fontSize: 13 }}>
+                      No matching competitor in this ladder.
+                    </div>
+                  ) : (
+                    filtered.map((p) => {
+                      const was = pastRank.get(p.id);
+                      const delta = was ? was - p.rank : 0;
+                      const key = `${wc}:${p.id}`;
+                      const takeoverWhen = nowData.lastTakeoverMap.get(key) || null;
+                      const defenseWhen = nowData.lastDefenseMap.get(key) || null;
+                      const isRecentTakeover = Boolean(showBadges && takeoverWhen && takeoverWhen >= cutoff);
+                      const isRecentDefense = Boolean(showBadges && defenseWhen && defenseWhen >= cutoff);
+                      const recent = isRecentTakeover || isRecentDefense;
+                      const jump = nowData.lastJumpMap.get(key) ?? 0;
+
+                      return (
+                        <div
+                          key={`${wc}:${p.id}`}
+                          className={`rank-row ${p.rank === 1 ? "champion" : ""} ${recent ? "recent" : ""}`}
+                          onClick={() => setSelectedPlayerId(p.id)}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") setSelectedPlayerId(p.id);
+                          }}
+                        >
+                          <div className="rank-num">{p.rank === 1 ? "👑" : p.rank}</div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+                              <span style={{ fontWeight: 820, letterSpacing: 0.1, overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</span>
+                              {isRecentTakeover && <span title="Took rank" style={{ color: gold }}>★</span>}
+                              {isRecentDefense && <span title="Defended">🛡️</span>}
+                              {showBadges && delta > 0 && (
+                                <span title={`Up ${delta} in selected window`} style={{ color: green, fontSize: 11, fontWeight: 900 }}>↑ {jump > 0 ? jump : delta}</span>
+                              )}
+                              {showBadges && delta < 0 && (
+                                <span title={`Down ${Math.abs(delta)} in selected window`} style={{ color: red, fontSize: 11, fontWeight: 850 }}>↓ {Math.abs(delta)}</span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: 10.5, opacity: 0.52, marginTop: 2 }}>Base · {prettyBaseLabel(p.weight_class)}</div>
+                          </div>
+                          <div style={{ opacity: 0.35, fontSize: 16 }}>›</div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </section>
+            );
+          })}
         </div>
       </div>
 
-      {/* Legend */}
-      <div style={{ marginBottom: 12, opacity: 0.95, display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={pill}><span title="Took rank" style={{ color: gold }}>★</span> takeover</span>
-        <span style={pill}><span title="Defended">🛡️</span> defense</span>
-        <span style={pill}><span title="Upward jump" style={{ color: "#22c55e" }}>↑</span> positions gained</span>
-        <span style={{ opacity: 0.8, fontSize: 12 }}>(badges show only within the chosen window)</span>
-      </div>
+      {/* Competitor profile drawer */}
+      {selectedPlayer && (
+        <div className="drawer-backdrop" onClick={() => setSelectedPlayerId(null)}>
+          <aside className="player-drawer" onClick={(e) => e.stopPropagation()} aria-label={`${selectedPlayer.name} profile`}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+              <div style={{ display: "flex", gap: 13, alignItems: "center", minWidth: 0 }}>
+                {photoForPlayer(selectedPlayer.id) ? (
+                  <img src={photoForPlayer(selectedPlayer.id)} alt={selectedPlayer.name} style={{ width: 76, height: 76, borderRadius: "50%", objectFit: "cover", border: "2px solid rgba(255,255,255,.28)" }} />
+                ) : (
+                  <div style={{ width: 76, height: 76, borderRadius: "50%", display: "grid", placeItems: "center", background: "rgba(255,255,255,.07)", fontSize: 29 }}>⚔️</div>
+                )}
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 23, fontWeight: 950, letterSpacing: -0.5, overflow: "hidden", textOverflow: "ellipsis" }}>{selectedPlayer.name}</div>
+                  <div style={{ opacity: 0.62, marginTop: 2, fontSize: 12 }}>Base category · {prettyBaseLabel(selectedPlayer.weight_class)}</div>
+                  {selectedChampionCount > 0 && (
+                    <div style={{ color: "#ffe792", marginTop: 5, fontSize: 12, fontWeight: 800 }}>👑 Champion in {selectedChampionCount} ladder{selectedChampionCount === 1 ? "" : "s"}</div>
+                  )}
+                </div>
+              </div>
+              <button className="control" style={{ ...button, padding: "6px 9px" }} onClick={() => setSelectedPlayerId(null)} aria-label="Close profile">✕</button>
+            </div>
 
-      <div style={gridStyle}>
-        {CONFIG.weightClasses.map((wc) => {
-          const current = (nowData.ladders[wc] || []).slice(0, limitFor(wc));
-          const past = pastData.ladders[wc] || [];
-          const pastRank = new Map(past.map((p) => [p.id, p.rank]));
-          const champion = current[0];
-          const champPhoto = champion ? photoForPlayer(champion.id) : "";
+            {(selectedPlayer.injuredRight || selectedPlayer.injuredLeft) && (
+              <div style={{ marginTop: 12, padding: "8px 10px", borderRadius: 10, background: "rgba(251,191,36,.09)", border: "1px solid rgba(251,191,36,.22)", color: "#fde68a", fontSize: 12 }}>
+                Injury status: {selectedPlayer.injuredRight && selectedPlayer.injuredLeft ? "Both arms" : selectedPlayer.injuredRight ? "Right arm" : "Left arm"}
+              </div>
+            )}
 
-          return (
-            <section key={wc} style={cardStyle}>
-              <div style={sectionHead}>
-                <strong style={{ fontSize: 16, letterSpacing: 0.3 }}>{prettyClassLabel(wc)}</strong>
-                {champion && (
-                  <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }} title={`Current #1: ${champion.name}`}>
-                    <span style={{ fontSize: 12, opacity: 0.85, marginRight: 4 }}>Champion</span>
-                    {champPhoto ? (
-                      <img src={champPhoto} alt={`${champion.name}`} style={champImg} />
-                    ) : (
-                      <div style={{ ...champImg, display: "grid", placeItems: "center", background: "rgba(255,255,255,.08)" }}>
-                        <span style={{ fontSize: 11, opacity: 0.8 }}>No photo</span>
-                      </div>
-                    )}
-                  </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, marginTop: 16 }}>
+              <div style={{ ...glass, borderRadius: 12, padding: 10 }}>
+                <div style={{ opacity: 0.55, fontSize: 10, textTransform: "uppercase" }}>Record</div>
+                <div style={{ fontSize: 20, fontWeight: 900, marginTop: 3 }}>{selectedStats?.wins || 0}-{selectedStats?.losses || 0}</div>
+              </div>
+              <div style={{ ...glass, borderRadius: 12, padding: 10 }}>
+                <div style={{ opacity: 0.55, fontSize: 10, textTransform: "uppercase" }}>Takeovers</div>
+                <div style={{ fontSize: 20, fontWeight: 900, marginTop: 3 }}>{selectedStats?.takeoverKeys?.size || 0}</div>
+              </div>
+              <div style={{ ...glass, borderRadius: 12, padding: 10 }}>
+                <div style={{ opacity: 0.55, fontSize: 10, textTransform: "uppercase" }}>Defenses</div>
+                <div style={{ fontSize: 20, fontWeight: 900, marginTop: 3 }}>{selectedStats?.defenseKeys?.size || 0}</div>
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
+              <div style={{ ...glass, borderRadius: 12, padding: 10 }}>
+                <div style={{ opacity: 0.55, fontSize: 10, textTransform: "uppercase" }}>Right arm</div>
+                <div style={{ fontWeight: 850, marginTop: 3 }}>{selectedStats?.rightWins || 0}W · {selectedStats?.rightLosses || 0}L</div>
+              </div>
+              <div style={{ ...glass, borderRadius: 12, padding: 10 }}>
+                <div style={{ opacity: 0.55, fontSize: 10, textTransform: "uppercase" }}>Left arm</div>
+                <div style={{ fontWeight: 850, marginTop: 3 }}>{selectedStats?.leftWins || 0}W · {selectedStats?.leftLosses || 0}L</div>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 20 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+                <h3 style={{ margin: 0, fontSize: 14 }}>Current ranks</h3>
+                {selectedStats?.biggestJump > 0 && <span style={{ fontSize: 11, color: green }}>Best single climb ↑ {selectedStats.biggestJump}</span>}
+              </div>
+              <div style={{ marginTop: 8 }}>
+                {selectedRanks.length === 0 ? (
+                  <div style={{ opacity: 0.55, fontSize: 12 }}>No active ranks.</div>
+                ) : (
+                  selectedRanks.map((r) => (
+                    <div className="drawer-rank" key={`${selectedPlayer.id}:${r.wc}`}>
+                      <span style={{ fontSize: 12, opacity: 0.76 }}>{prettyClassLabel(r.wc)}</span>
+                      <strong style={{ color: r.rank === 1 ? "#ffe792" : "white" }}>{r.rank === 1 ? "👑 #1" : `#${r.rank}`}</strong>
+                    </div>
+                  ))
                 )}
               </div>
+            </div>
 
-              <div style={{ padding: 10 }}>
-                {current.map((p) => {
-                  const was = pastRank.get(p.id);
-                  const delta = was ? was - p.rank : 0;
-
-                  const key = `${wc}:${p.id}`;
-                  const takeoverWhen = nowData.lastTakeoverMap.get(key) || null;
-                  const defenseWhen = nowData.lastDefenseMap.get(key) || null;
-
-                  const isRecentTakeover = showBadges && takeoverWhen && takeoverWhen >= cutoff;
-                  const isRecentDefense = showBadges && defenseWhen && defenseWhen >= cutoff;
-
-                  const jump = nowData.lastJumpMap.get(key) ?? 0;
-                  const nameColor = isRecentTakeover || isRecentDefense ? "#22c55e" : "white";
-
-                  return (
-                    <div key={`${wc}:${p.id}`} style={rowStyle}>
-                      <div style={rankStyle}>{p.rank}</div>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                          <span style={{ ...nameStyle, color: nameColor }}>{p.name}</span>
-                          {isRecentTakeover && (jump > 0 || delta > 0) && (
-                            <span title={`Up ${jump > 0 ? jump : delta}`} style={{ color: "#22c55e", fontWeight: 800 }}>
-                              ↑ {jump > 0 ? jump : delta}
-                            </span>
-                          )}
-                          {isRecentTakeover && <span title="Took rank" style={{ color: gold }}>★</span>}
-                          {isRecentDefense && <span title="Defended">🛡️</span>}
-                        </div>
-                        <div style={subStyle}>Base: {p.weight_class}</div>
-                      </div>
-                    </div>
-                  );
-                })}
+            <div style={{ marginTop: 20 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <h3 style={{ margin: 0, fontSize: 14 }}>Recent matches</h3>
+                {(selectedStats?.currentStreak || 0) > 1 && <span style={{ fontSize: 11, color: green }}>🔥 {selectedStats.currentStreak} win streak</span>}
               </div>
-            </section>
-          );
-        })}
-      </div>
+              <div style={{ marginTop: 7 }}>
+                {selectedRecentHistory.length === 0 ? (
+                  <div style={{ opacity: 0.55, fontSize: 12 }}>No recorded matches.</div>
+                ) : (
+                  selectedRecentHistory.map((m) => {
+                    const opp = playerById.get(m.opponentId);
+                    return (
+                      <div key={`${m._stableKey}:${m.result}`} style={{ display: "grid", gridTemplateColumns: "30px 1fr auto", gap: 9, alignItems: "center", padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,.07)" }}>
+                        <div style={{ width: 27, height: 27, borderRadius: 8, display: "grid", placeItems: "center", fontWeight: 950, fontSize: 11, color: m.result === "W" ? "#a7f3d0" : "#fecdd3", background: m.result === "W" ? "rgba(52,211,153,.10)" : "rgba(251,113,133,.09)" }}>{m.result}</div>
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 760 }}>{opp?.name || m.opponentId}</div>
+                          <div style={{ opacity: 0.5, fontSize: 10.5 }}>{m.arm}{m.weight_class ? ` · ${m.weight_class}` : ""}</div>
+                        </div>
+                        <div style={{ opacity: 0.52, fontSize: 10.5 }}>{formatDateAU(m._parsedDate)}</div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </aside>
+        </div>
+      )}
     </div>
   );
 }
