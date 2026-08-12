@@ -50,9 +50,6 @@ const CONFIG = {
   photos: {
     byPlayerId: {
       aden_w: "/aden_champ.png",
-      tristan_c: "/tristan_champ.png",
-      wesley_h: "/wesley_champ.png",
-      yve_w: "/Yve_Champ_New.jpg",
       luke_a: "/luke_champ.png",
       moses_m: "/moses_champ.png",
       bowen_c: "/bowen_champ.png",
