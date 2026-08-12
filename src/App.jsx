@@ -67,8 +67,6 @@ const CONFIG = {
       lachlan_c: "/lachlan_champ.png",
       dimi_b: "/dimi_champ.png",
       jacob_s: "/shiggs_champ.png",
-      harrison_r: "/harrison_champ.png",
-      aidan_b: "/aidan_champ.png",
     },
     size: 72,
     ring: true,
@@ -774,6 +772,14 @@ export default function App() {
     [matches]
   );
 
+  // Public/competitor-facing match data excludes rows where Badge? = FALSE.
+  // Those rows still replay through the ladder engine, but they must be invisible
+  // in W-L records, arm records, streaks, recent-match history and public counts.
+  const visibleMatches = useMemo(
+    () => sortedMatches.filter((m) => !m._badgeSuppressed),
+    [sortedMatches]
+  );
+
   const playerStats = useMemo(() => {
     const map = new Map();
     players.forEach((p) =>
@@ -793,7 +799,7 @@ export default function App() {
       })
     );
 
-    sortedMatches.forEach((m) => {
+    visibleMatches.forEach((m) => {
       const w = map.get(m.winner_id);
       const l = map.get(m.loser_id);
 
@@ -825,7 +831,7 @@ export default function App() {
     });
 
     return map;
-  }, [players, sortedMatches, nowData.eventLog]);
+  }, [players, visibleMatches, nowData.eventLog]);
 
   // One activity item per match/event type, aggregating every ladder affected by that win.
   const rankActivity = useMemo(() => {
@@ -1036,7 +1042,7 @@ export default function App() {
           </div>
           <div style={statCard}>
             <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Recorded matches</div>
-            <div style={{ fontSize: 24, fontWeight: 900, marginTop: 2 }}>{sortedMatches.length}</div>
+            <div style={{ fontSize: 24, fontWeight: 900, marginTop: 2 }}>{visibleMatches.length}</div>
           </div>
           <div style={statCard}>
             <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Last update</div>
