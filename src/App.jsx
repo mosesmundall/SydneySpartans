@@ -1036,9 +1036,13 @@ export default function App() {
         .rank-row + .rank-row { margin-top:2px; }
         .rank-row:hover { transform:translateX(3px); background:rgba(255,255,255,.075); }
         .rank-row.champion { background:linear-gradient(90deg,rgba(245,197,66,.14),rgba(245,197,66,.035)); border:1px solid rgba(245,197,66,.18); }
+        .rank-row.silver { background:linear-gradient(90deg,rgba(210,214,224,.11),rgba(210,214,224,.03)); border:1px solid rgba(210,214,224,.16); }
+        .rank-row.bronze { background:linear-gradient(90deg,rgba(191,131,92,.11),rgba(191,131,92,.03)); border:1px solid rgba(191,131,92,.16); }
         .rank-row.recent { animation:recentGlow 1.15s ease-out both; }
         .rank-num { width:32px; height:32px; display:grid; place-items:center; border-radius:10px; font-weight:900; background:rgba(255,255,255,.055); flex:0 0 32px; }
         .rank-row.champion .rank-num { color:#ffe792; background:rgba(245,197,66,.13); }
+        .rank-row.silver .rank-num { color:#eef2ff; background:rgba(210,214,224,.12); }
+        .rank-row.bronze .rank-num { color:#f2d3bd; background:rgba(191,131,92,.12); }
         .champ-photo { width:66px; height:66px; border-radius:50%; object-fit:cover; border:2px solid rgba(245,197,66,.88); box-shadow:0 0 0 4px rgba(245,197,66,.10), 0 8px 25px rgba(0,0,0,.32); }
         .activity-item { display:grid; grid-template-columns:34px 1fr auto; gap:10px; align-items:start; padding:10px 0; }
         .activity-item + .activity-item { border-top:1px solid rgba(255,255,255,.08); }
@@ -1193,7 +1197,7 @@ export default function App() {
           <span style={{ opacity: 0.55, fontSize: 11 }}>Click any competitor for full details.</span>
         </div>
 
-        {/* Recent ladder activity */}
+        {/* Recent activity */}
         <section style={{ ...cardStyle, marginBottom: 18 }}>
           <button
             onClick={() => setShowActivity((v) => !v)}
@@ -1212,8 +1216,8 @@ export default function App() {
             }}
           >
             <div>
-              <div style={{ fontWeight: 850 }}>Recent ladder activity</div>
-              <div style={{ fontSize: 11, opacity: 0.58, marginTop: 2 }}>Takeovers and successful defenses across every affected class</div>
+              <div style={{ fontWeight: 850 }}>Recent activity</div>
+              <div style={{ fontSize: 11, opacity: 0.58, marginTop: 2 }}>Recent rank changes and successful defenses across every affected class</div>
             </div>
             <span style={{ opacity: 0.65 }}>{showActivity ? "Hide ▲" : "Show ▼"}</span>
           </button>
@@ -1221,7 +1225,7 @@ export default function App() {
           {showActivity && (
             <div style={{ padding: "0 15px 12px" }}>
               {rankActivity.length === 0 ? (
-                <div style={{ padding: "12px 0", opacity: 0.6 }}>No ladder activity recorded yet.</div>
+                <div style={{ padding: "12px 0", opacity: 0.6 }}>No recent activity recorded yet.</div>
               ) : (
                 rankActivity.slice(0, 6).map((item) => {
                   const winner = playerById.get(item.winner_id);
@@ -1277,7 +1281,7 @@ export default function App() {
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <div style={{ fontSize: 17, fontWeight: 900, letterSpacing: -0.2 }}>{prettyClassLabel(wc)}</div>
                       <div style={{ fontSize: 10.5, opacity: 0.5, marginTop: 3 }}>
-                        {lastActivity ? `Last activity ${formatDateAU(lastActivity)}` : "No recorded ladder activity"}
+                        {lastActivity ? `Last activity ${formatDateAU(lastActivity)}` : "No recorded activity"}
                       </div>
                     </div>
 
@@ -1304,7 +1308,7 @@ export default function App() {
                 <div style={{ padding: 8 }}>
                   {filtered.length === 0 ? (
                     <div style={{ padding: "18px 12px", opacity: 0.55, textAlign: "center", fontSize: 13 }}>
-                      No matching competitor in this ladder.
+                      No matching competitor in this class.
                     </div>
                   ) : (
                     filtered.map((p) => {
@@ -1319,7 +1323,7 @@ export default function App() {
                       return (
                         <div
                           key={`${wc}:${p.id}`}
-                          className={`rank-row ${p.rank === 1 ? "champion" : ""} ${recent ? "recent" : ""}`}
+                          className={`rank-row ${p.rank === 1 ? "champion" : p.rank === 2 ? "silver" : p.rank === 3 ? "bronze" : ""} ${recent ? "recent" : ""}`}
                           onClick={() => setSelectedPlayerId(p.id)}
                           role="button"
                           tabIndex={0}
@@ -1369,7 +1373,7 @@ export default function App() {
                   <div style={{ fontSize: 23, fontWeight: 950, letterSpacing: -0.5, overflow: "hidden", textOverflow: "ellipsis" }}>{selectedPlayer.name}</div>
                   <div style={{ opacity: 0.62, marginTop: 2, fontSize: 12 }}>Base category · {prettyBaseLabel(selectedPlayer.weight_class)}</div>
                   {selectedChampionCount > 0 && (
-                    <div style={{ color: "#ffe792", marginTop: 5, fontSize: 12, fontWeight: 800 }}>👑 Champion in {selectedChampionCount} ladder{selectedChampionCount === 1 ? "" : "s"}</div>
+                    <div style={{ color: "#ffe792", marginTop: 5, fontSize: 12, fontWeight: 800 }}>👑 Champion in {selectedChampionCount} class{selectedChampionCount === 1 ? "" : "es"}</div>
                   )}
                 </div>
               </div>
