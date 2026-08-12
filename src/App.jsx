@@ -328,12 +328,12 @@ function computeLaddersThroughDate(players, matches, displayClasses, cutoff) {
     })
     .filter(Boolean)
     .sort((a, b) => {
+      // Replay matches by calendar date first.
       if (a._t !== b._t) return a._t - b._t;
-      if ((a._seq ?? Infinity) !== (b._seq ?? Infinity))
-        return (a._seq ?? Infinity) - (b._seq ?? Infinity);
 
-      // If date/time and Seq are the same (or Seq is blank), preserve sheet row order.
-      // Ranking replay is path-dependent, so deterministic row order matters.
+      // For matches on the same date, the Google Sheet is the source of truth:
+      // the highest row happened first and each lower row happened afterwards.
+      // Time/Seq columns intentionally do NOT override sheet row order.
       if ((a._rowIndex ?? Infinity) !== (b._rowIndex ?? Infinity))
         return (a._rowIndex ?? Infinity) - (b._rowIndex ?? Infinity);
 
@@ -580,8 +580,10 @@ export default function App() {
 
           arm = arm.startsWith("l") ? "Left" : arm.startsWith("r") ? "Right" : "";
 
-          const dt = time ? `${date} ${time}` : date;
-          const dtParsed = parseDateTimeUTC(dt);
+          // Ranking order is based on the DATE column only. If multiple matches share
+          // a date, their physical Google Sheet row order determines chronology.
+          const dt = date;
+          const dtParsed = parseDateTimeUTC(date);
 
           const stableKey = [
             dtParsed ? dtParsed.toISOString() : "na",
@@ -680,8 +682,6 @@ export default function App() {
           const at = a._parsedDate.getTime();
           const bt = b._parsedDate.getTime();
           if (at !== bt) return at - bt;
-          if ((a._seq ?? Infinity) !== (b._seq ?? Infinity))
-            return (a._seq ?? Infinity) - (b._seq ?? Infinity);
           return (a._rowIndex ?? 0) - (b._rowIndex ?? 0);
         }),
     [matches]
@@ -932,7 +932,7 @@ export default function App() {
               <span style={{ ...pill, color: "#ffe792", borderColor: "rgba(245,197,66,.3)" }}>RANKINGS</span>
             </div>
             <div className="desktop-subtitle" style={{ marginTop: 3, opacity: 0.72, fontSize: 13 }}>
-              competitive ladder • cross-class challenges • live from Google Sheets
+              Live Sydney Ranks • Check out competitor profiles 
             </div>
           </div>
 
