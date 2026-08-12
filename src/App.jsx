@@ -2,15 +2,21 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import Papa from "papaparse";
 
 /* ===================== GROUPS & DISPLAY ===================== */
-/* Youth + Women (u60kg) + Men classes u70kg → 100kg+ */
-const ORDER_GROUPS = ["youth", "u60kg", "u70kg", "u80kg", "u90kg", "u100kg", "100kg+"];
+/*
+ * Ranking eligibility hierarchy, LOWEST -> HIGHEST:
+ * Women -> Youth -> u70kg -> u80kg -> u90kg -> u100kg -> 100kg+
+ *
+ * A player may hold ranks in their base group and every group ABOVE it.
+ * They may never hold/take a rank below their base group.
+ */
+const ORDER_GROUPS = ["u60kg", "youth", "u70kg", "u80kg", "u90kg", "u100kg", "100kg+"];
 const ARMS = ["Right", "Left"];
 
 /**
  * Display order:
- * - Men classes first (heavy → light)
- * - Then Women
- * - Then Youth (very bottom)
+ * - Open classes first (heavy -> light)
+ * - Then Youth
+ * - Women at the very bottom
  */
 const DISPLAY_CLASSES = [
   ...ORDER_GROUPS
@@ -18,8 +24,8 @@ const DISPLAY_CLASSES = [
     .slice()
     .reverse()
     .flatMap((g) => ARMS.map((a) => `${g} ${a}`)),
-  ...ARMS.map((a) => `u60kg ${a}`),
   ...ARMS.map((a) => `youth ${a}`),
+  ...ARMS.map((a) => `u60kg ${a}`),
 ];
 
 /* ===================== CONFIG ===================== */
@@ -100,12 +106,12 @@ const gv = (obj, ...keys) => {
   return "";
 };
 
-/* Parse date/datetime as UTC (supports ISO and M/D/YYYY or D/M/YYYY) */
+/* Parse date/datetime as UTC. Slash dates are explicitly Australian D/M/YYYY. */
 function parseDateTimeUTC(s) {
   const t = String(s || "").trim();
   if (!t) return null;
 
-  // 1) ISO
+  // 1) ISO YYYY-MM-DD
   let m =
     /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2})(?::(\d{1,2})(?::(\d{1,2}))?)?)?$/.exec(
       t
@@ -115,17 +121,15 @@ function parseDateTimeUTC(s) {
     return new Date(Date.UTC(+y, +mo - 1, +d, +hh, +mi, +ss));
   }
 
-  // 2) Slash dates
+  // 2) Australian slash dates D/M/YYYY
   m =
     /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ T](\d{1,2})(?::(\d{1,2})(?::(\d{1,2}))?)?)?$/.exec(
       t
     );
   if (m) {
-    let a = +m[1],
-      b = +m[2],
+    const d = +m[1],
+      mo = +m[2],
       y = +m[3];
-    let mo = a > 12 ? b : a;
-    let d = a > 12 ? a : b;
     const hh = +(m[4] ?? 12),
       mi = +(m[5] ?? 0),
       ss = +(m[6] ?? 0);
@@ -151,13 +155,23 @@ function parseInjury(val) {
 }
 
 /* ===================== ELIGIBILITY & SEEDING ===================== */
-/* Treat "women" as "u60kg". Youth do NOT qualify for women's. */
+/*
+ * Treat "women" as the internal "u60kg" ladder key.
+ *
+ * Because ORDER_GROUPS is lowest -> highest, eligibility is simply:
+ * base group + every group above it.
+ *
+ * Examples:
+ * Women -> Women, Youth, u70, u80, u90, u100, 100+
+ * Youth -> Youth, u70, u80, u90, u100, 100+
+ * u70   -> u70, u80, u90, u100, 100+
+ */
 function eligibleClassesFor(player) {
-  const raw = String(player.weight_class || "").trim();
-  const baseRaw = raw.toLowerCase();
+  const baseRaw = String(player.weight_class || "").trim().toLowerCase();
 
+  // Keep the existing internal key "u60kg" for the Women's ladder.
   const base =
-    baseRaw === "women" ? "u60kg" : baseRaw === "youth" ? "youth" : raw;
+    baseRaw === "women" || baseRaw === "woman" ? "u60kg" : baseRaw;
 
   const baseIdx = ORDER_GROUPS.indexOf(base);
   if (baseIdx === -1) return [];
@@ -165,10 +179,6 @@ function eligibleClassesFor(player) {
   const labels = [];
   for (let i = baseIdx; i < ORDER_GROUPS.length; i++) {
     const group = ORDER_GROUPS[i];
-
-    // ✅ Youth can NOT qualify for Women's (u60kg)
-    if (base === "youth" && group === "u60kg") continue;
-
     for (const arm of ARMS) labels.push(`${group} ${arm}`);
   }
   return labels;
@@ -302,6 +312,12 @@ function computeLaddersThroughDate(players, matches, displayClasses, cutoff) {
       if (a._t !== b._t) return a._t - b._t;
       if ((a._seq ?? Infinity) !== (b._seq ?? Infinity))
         return (a._seq ?? Infinity) - (b._seq ?? Infinity);
+
+      // If date/time and Seq are the same (or Seq is blank), preserve sheet row order.
+      // Ranking replay is path-dependent, so deterministic row order matters.
+      if ((a._rowIndex ?? Infinity) !== (b._rowIndex ?? Infinity))
+        return (a._rowIndex ?? Infinity) - (b._rowIndex ?? Infinity);
+
       return a._stableKey.localeCompare(b._stableKey);
     })
     .forEach((m) => {
@@ -489,6 +505,7 @@ export default function App() {
           date,
           _dateTime: dt,
           _seq: seq,
+          _rowIndex: rowIndex,
           _stableKey: stableKey,
           weight_class: wc,
           winner_id: win,
