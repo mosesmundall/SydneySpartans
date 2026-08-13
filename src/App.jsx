@@ -38,8 +38,8 @@ const DISPLAY_CLASSES = [
 /* Using gviz for fast-refresh CSVs */
 const CONFIG = {
   sheets: {
-    players: { id: "15DuCXPZXtIG97V5pCod2kLkW4iqkb3kOBwoo7znwDDU", gid: "0" },
-    matches: { id: "1DGCu6nW9TNH-id5Xfsc4TkerwvJ1vh09uZrKmUfNMlU", gid: "0" },
+    players: { id: "15DuCXPZXtIG97V5pCod2kLkW4iqkb3kOBwoo7znwDDU", gid: "1561293575" },
+    matches: { id: "1DGCu6nW9TNH-id5Xfsc4TkerwvJ1vh09uZrKmUfNMlU", gid: "573157689" },
   },
   weightClasses: DISPLAY_CLASSES,
   branding: {
@@ -225,7 +225,7 @@ function seedLadders(players, displayClasses) {
    * Right and Left arm:
    *   1 = best overall, 2 = next best, etc.
    *   valid numeric seeds first; unseeded players go underneath them in
-   *   Players-sheet row order.
+   *   Competitor-sheet row order.
    *
    * Only AFTER that global order exists do we create each category ladder by
    * filtering out players who are not eligible for that category.
@@ -233,7 +233,7 @@ function seedLadders(players, displayClasses) {
    * Example: if Bhavya is global RH seed 21, he begins around that part of the
    * global order. In U100 he may move up a few places only because heavier
    * 100kg+ competitors are ineligible for U100; he must NOT become #2 merely
-   * because he is a U80 competitor or because of his Players-sheet row.
+   * because he is a U80 competitor or because of his Competitor-sheet row.
    *
    * Historical matches are replayed after this seed stage and always override
    * the starting order wherever a real takeover occurs.
@@ -266,7 +266,7 @@ function seedLadders(players, displayClasses) {
         if (aRank !== bRank) return aRank - bRank;
 
         // Duplicate seed values or two unseeded players are resolved by their
-        // physical Players-sheet order, top row first.
+        // physical Competitor-sheet order, top row first.
         const rowDiff =
           (a._playerRowIndex ?? Infinity) - (b._playerRowIndex ?? Infinity);
         if (rowDiff !== 0) return rowDiff;
@@ -710,17 +710,17 @@ function validateClubData(playerRows, matchRows) {
     }
 
     if (!winner) {
-      add("error", "Matches", row, "Winner ID", "Missing Winner ID", "", "Enter the exact Player ID from the Players sheet.");
+      add("error", "Matches", row, "Winner ID", "Missing Winner ID", "", "Enter the exact Competitor ID from the Competitor sheet.");
     } else if (!validIdSet.has(winner)) {
       const suggestion = closestPlayerId(winner, uniqueValidIds);
-      add("error", "Matches", row, "Winner ID", "Winner ID not found in Players sheet", winner, suggestion ? `Possible match: ${suggestion}` : "Use an exact Player ID from the Players sheet.");
+      add("error", "Matches", row, "Winner ID", "Winner ID not found in Competitor sheet", winner, suggestion ? `Possible match: ${suggestion}` : "Use an exact Competitor ID from the Competitor sheet.");
     }
 
     if (!loser) {
-      add("error", "Matches", row, "Looser ID", "Missing Loser ID", "", "Enter the exact Player ID from the Players sheet.");
+      add("error", "Matches", row, "Looser ID", "Missing Loser ID", "", "Enter the exact Competitor ID from the Competitor sheet.");
     } else if (!validIdSet.has(loser)) {
       const suggestion = closestPlayerId(loser, uniqueValidIds);
-      add("error", "Matches", row, "Looser ID", "Loser ID not found in Players sheet", loser, suggestion ? `Possible match: ${suggestion}` : "Use an exact Player ID from the Players sheet.");
+      add("error", "Matches", row, "Looser ID", "Loser ID not found in Competitor sheet", loser, suggestion ? `Possible match: ${suggestion}` : "Use an exact Competitor ID from the Competitor sheet.");
     }
 
     if (winner && loser && winner === loser) {
@@ -758,7 +758,7 @@ function validateClubData(playerRows, matchRows) {
         "CONFIG.photos.byPlayerId",
         "Photo mapping does not match a Player ID",
         photoId,
-        "Either correct the photo mapping key or add the matching Player ID to the Players sheet.",
+        "Either correct the photo mapping key or add the matching Competitor ID to the Competitor sheet.",
         { codeLocation: `CONFIG.photos.byPlayerId.${photoId}` }
       );
     }
@@ -851,7 +851,7 @@ export default function App() {
         );
         const srSingle = trim(gv(r, "starting rank", "current_rank"));
 
-        // The Sydney Players sheet has the arm starting ranks in columns F and G.
+        // The Sydney Competitor sheet has the arm starting ranks in columns F and G.
         // Google/Papa can rename duplicate-looking CSV headers, so use the physical
         // column values as a robust fallback when an explicit RH/LH header was not
         // found. F = Right, G = Left.
@@ -885,7 +885,7 @@ export default function App() {
           name: nm || safeId,
           weight_class: wc,
           active: yes(act),
-          // Preserve physical Players-sheet order for deterministic unseeded placement.
+          // Preserve physical Competitor-sheet order for deterministic unseeded placement.
           // idx 0 is the first data row beneath the header; larger idx = lower in sheet.
           _playerRowIndex: idx,
           injuredRight,
@@ -1358,7 +1358,7 @@ export default function App() {
               <div style={{ fontSize:27, fontWeight:950, marginTop:2, color:dataHealthCounts.warnings ? "#fde68a" : green }}>● {dataHealthCounts.warnings}</div>
             </div>
             <div style={statCard}>
-              <div style={{ fontSize:11, opacity:.62, textTransform:"uppercase", letterSpacing:1 }}>Players checked</div>
+              <div style={{ fontSize:11, opacity:.62, textTransform:"uppercase", letterSpacing:1 }}>Competitors checked</div>
               <div style={{ fontSize:27, fontWeight:950, marginTop:2 }}>{dataHealthMeta.playerRows}</div>
             </div>
             <div style={statCard}>
@@ -1399,7 +1399,7 @@ export default function App() {
                 const sheetKey = issue.source === "Players" ? "players" : issue.source === "Matches" ? "matches" : null;
                 const location = issue.source === "Code"
                   ? (issue.codeLocation || issue.field)
-                  : `${issue.source} sheet · Row ${issue.row}`;
+                  : `${issue.source === "Players" ? "Competitor sheet" : "Match sheet"} · Row ${issue.row}`;
                 return (
                   <div className="issue-card" key={issue.id} style={{ borderColor:isError ? "rgba(251,113,133,.32)" : "rgba(251,191,36,.28)" }}>
                     <div style={{ display:"flex", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
