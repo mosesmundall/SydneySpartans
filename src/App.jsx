@@ -887,6 +887,7 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
   const [loserId, setLoserId] = useState("");
   const [arm, setArm] = useState("");
   const [dateIso, setDateIso] = useState(initialNow.date);
+  const [hidePublicActivity, setHidePublicActivity] = useState(false);
   const [backend, setBackend] = useState({ loading: true, ok: false, error: "", matchSheet: "" });
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
@@ -931,7 +932,7 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
           "content-type": "application/json",
           "x-match-entry-token": accessToken,
         },
-        body: JSON.stringify({ winnerId, loserId, arm, dateIso, allowDuplicate }),
+        body: JSON.stringify({ winnerId, loserId, arm, dateIso, hidePublicActivity, allowDuplicate }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.status === 409 && data.duplicate) {
@@ -944,6 +945,7 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
       setWinnerId("");
       setLoserId("");
       setArm("");
+      setHidePublicActivity(false);
       await onReload?.();
     } catch (e) {
       setSubmitError(e?.message || "Could not add match.");
@@ -1036,6 +1038,21 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
             ) : <span style={{ opacity:.58 }}>Choose the winner, loser and arm. IDs are inserted automatically from the Competitor sheet.</span>}
           </div>
 
+          <label style={{ display:"flex", alignItems:"flex-start", gap:10, marginTop:14, padding:"11px 12px", borderRadius:11, border:"1px solid rgba(255,255,255,.11)", background:"rgba(255,255,255,.035)", cursor:"pointer" }}>
+            <input
+              type="checkbox"
+              checked={hidePublicActivity}
+              onChange={(e) => setHidePublicActivity(e.target.checked)}
+              style={{ marginTop:2, width:16, height:16, accentColor:"#f5c542", cursor:"pointer", flex:"0 0 auto" }}
+            />
+            <span>
+              <span style={{ display:"block", fontSize:12.5, fontWeight:850 }}>Hidden ranking adjustment</span>
+              <span style={{ display:"block", fontSize:11, opacity:.58, marginTop:2, lineHeight:1.4 }}>
+                Check this to move the ranks without showing this match in public records, history, streaks, badges, arrows or recent activity.
+              </span>
+            </span>
+          </label>
+
           <button
             type="button"
             disabled={!canSubmit}
@@ -1046,7 +1063,7 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
           </button>
 
           <div style={{ opacity:.46, fontSize:10.5, lineHeight:1.45, marginTop:9, textAlign:"center" }}>
-            The backend re-checks the competitor IDs, sheet headers, date, arm and duplicates before anything is written. Same-day match order follows Match-sheet row order. Badge? is left blank for a normal public match.
+            The backend re-checks the competitor IDs, sheet headers, date, arm and duplicates before anything is written. Same-day match order follows Match-sheet row order. Hidden ranking adjustment writes FALSE into Badge?; otherwise Badge? is left blank.
           </div>
         </div>
       </div>
