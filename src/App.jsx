@@ -887,8 +887,7 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
   const [loserId, setLoserId] = useState("");
   const [arm, setArm] = useState("");
   const [dateIso, setDateIso] = useState(initialNow.date);
-  const [time, setTime] = useState(initialNow.time);
-  const [backend, setBackend] = useState({ loading: true, ok: false, error: "", timeColumnPresent: false, matchSheet: "" });
+  const [backend, setBackend] = useState({ loading: true, ok: false, error: "", matchSheet: "" });
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [success, setSuccess] = useState(null);
@@ -906,9 +905,9 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
         const data = await res.json().catch(() => ({}));
         if (cancelled) return;
         if (!res.ok || !data.ok) throw new Error(data.error || `Backend check failed (${res.status}).`);
-        setBackend({ loading: false, ok: true, error: "", timeColumnPresent: Boolean(data.timeColumnPresent), matchSheet: data.matchSheet || "" });
+        setBackend({ loading: false, ok: true, error: "", matchSheet: data.matchSheet || "" });
       } catch (e) {
-        if (!cancelled) setBackend({ loading: false, ok: false, error: e?.message || "Could not connect to match-entry backend.", timeColumnPresent: false, matchSheet: "" });
+        if (!cancelled) setBackend({ loading: false, ok: false, error: e?.message || "Could not connect to match-entry backend.", matchSheet: "" });
       }
     }
     checkBackend();
@@ -932,7 +931,7 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
           "content-type": "application/json",
           "x-match-entry-token": accessToken,
         },
-        body: JSON.stringify({ winnerId, loserId, arm, dateIso, time, allowDuplicate }),
+        body: JSON.stringify({ winnerId, loserId, arm, dateIso, allowDuplicate }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.status === 409 && data.duplicate) {
@@ -945,7 +944,6 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
       setWinnerId("");
       setLoserId("");
       setArm("");
-      setTime(sydneyInputNow().time);
       await onReload?.();
     } catch (e) {
       setSubmitError(e?.message || "Could not add match.");
@@ -980,12 +978,6 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
         {!backend.ok && !backend.loading && (
           <div style={{ ...glass, borderRadius:14, padding:13, marginBottom:14, borderColor:"rgba(251,113,133,.42)", color:"#fecdd3" }}>
             <strong>Setup issue:</strong> {backend.error}
-          </div>
-        )}
-
-        {backend.ok && !backend.timeColumnPresent && (
-          <div style={{ ...glass, borderRadius:14, padding:12, marginBottom:14, borderColor:"rgba(251,191,36,.25)", color:"#fde68a", fontSize:12 }}>
-            The Match sheet has no <strong>Time</strong> column. Matches will still be added correctly and same-day ordering still uses sheet row order; add a <strong>Time</strong> column at the far right if you want the entered time stored too.
           </div>
         )}
 
@@ -1031,14 +1023,10 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
             </div>
           </div>
 
-          <div className="match-entry-grid" style={{ marginTop:16 }}>
-            <label>
+          <div style={{ marginTop:16 }}>
+            <label style={{ display:"block" }}>
               <span style={{ display:"block", fontSize:11, opacity:.62, textTransform:"uppercase", letterSpacing:1, marginBottom:6 }}>Date</span>
               <input type="date" value={dateIso} max={sydneyInputNow().date} onChange={(e) => setDateIso(e.target.value)} style={{ width:"100%", padding:"11px", borderRadius:10, border:"1px solid rgba(255,255,255,.15)", background:"rgba(0,0,0,.2)", color:"white" }} />
-            </label>
-            <label>
-              <span style={{ display:"block", fontSize:11, opacity:.62, textTransform:"uppercase", letterSpacing:1, marginBottom:6 }}>Time</span>
-              <input type="time" value={time} onChange={(e) => setTime(e.target.value)} style={{ width:"100%", padding:"11px", borderRadius:10, border:"1px solid rgba(255,255,255,.15)", background:"rgba(0,0,0,.2)", color:"white" }} />
             </label>
           </div>
 
@@ -1058,7 +1046,7 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
           </button>
 
           <div style={{ opacity:.46, fontSize:10.5, lineHeight:1.45, marginTop:9, textAlign:"center" }}>
-            The backend re-checks the competitor IDs, sheet headers, date, arm and duplicates before anything is written. Badge? is left blank for a normal public match.
+            The backend re-checks the competitor IDs, sheet headers, date, arm and duplicates before anything is written. Same-day match order follows Match-sheet row order. Badge? is left blank for a normal public match.
           </div>
         </div>
       </div>
