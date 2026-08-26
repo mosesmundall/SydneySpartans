@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Papa from "papaparse";
 
 /* ===================== GROUPS & DISPLAY ===================== */
@@ -774,6 +774,299 @@ function validateClubData(playerRows, matchRows) {
   return issues;
 }
 
+
+/* ===================== MATCH ENTRY ===================== */
+function sydneyInputNow() {
+  const parts = new Intl.DateTimeFormat("en-AU", {
+    timeZone: "Australia/Sydney",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
+  const get = (type) => parts.find((p) => p.type === type)?.value || "";
+  return { date: `${get("year")}-${get("month")}-${get("day")}`, time: `${get("hour")}:${get("minute")}` };
+}
+
+function initialMatchEntryToken() {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get("match-entry") || "";
+}
+
+function matchEntrySuggestions(players, query, excludedId = "") {
+  const q = trim(query).toLowerCase();
+  if (!q) return [];
+  return players
+    .filter((p) => p.id !== excludedId)
+    .map((p) => {
+      const name = String(p.name || "").toLowerCase();
+      const id = String(p.id || "").toLowerCase();
+      const starts = name.startsWith(q) || id.startsWith(q);
+      const contains = name.includes(q) || id.includes(q);
+      return { p, score: starts ? 0 : contains ? 1 : 2 };
+    })
+    .filter((x) => x.score < 2)
+    .sort((a, b) => a.score - b.score || (b.p.active ? 1 : 0) - (a.p.active ? 1 : 0) || a.p.name.localeCompare(b.p.name))
+    .slice(0, 8)
+    .map((x) => x.p);
+}
+
+function CompetitorMatchPicker({ label, players, selectedId, onSelect, excludedId, glass }) {
+  const selected = players.find((p) => p.id === selectedId) || null;
+  const [query, setQuery] = useState(selected ? selected.name : "");
+  const [focused, setFocused] = useState(false);
+  const previousSelectedId = useRef(selectedId);
+  const suggestions = matchEntrySuggestions(players, query, excludedId);
+
+  useEffect(() => {
+    const p = players.find((x) => x.id === selectedId);
+    if (p) setQuery(p.name);
+    else if (previousSelectedId.current && !selectedId) setQuery("");
+    previousSelectedId.current = selectedId;
+  }, [selectedId, players]);
+
+  return (
+    <div style={{ position: "relative" }}>
+      <label style={{ display: "block", fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{label}</label>
+      <input
+        value={query}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          if (selectedId) onSelect("");
+        }}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setTimeout(() => setFocused(false), 140)}
+        placeholder={`Type ${label.toLowerCase()}'s name or ID…`}
+        autoComplete="off"
+        style={{
+          width: "100%",
+          padding: "12px 12px",
+          borderRadius: 11,
+          border: selected ? "1px solid rgba(52,211,153,.4)" : "1px solid rgba(255,255,255,.15)",
+          background: "rgba(0,0,0,.2)",
+          color: "white",
+          outline: "none",
+        }}
+      />
+      {selected && (
+        <div style={{ marginTop: 5, fontSize: 11, opacity: 0.65 }}>
+          Selected <strong style={{ color: "white" }}>{selected.id}</strong> · {prettyBaseLabel(selected.weight_class)}{selected.active ? "" : " · inactive"}
+        </div>
+      )}
+      {focused && query.trim() && !selected && (
+        <div style={{ ...glass, position: "absolute", zIndex: 30, top: 68, left: 0, right: 0, borderRadius: 12, overflow: "hidden", maxHeight: 310, overflowY: "auto" }}>
+          {suggestions.length === 0 ? (
+            <div style={{ padding: 12, fontSize: 12, opacity: 0.62 }}>No competitor matches “{query}”.</div>
+          ) : suggestions.map((p) => (
+            <button
+              type="button"
+              key={p.id}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onSelect(p.id);
+                setQuery(p.name);
+                setFocused(false);
+              }}
+              style={{ width: "100%", border: 0, borderBottom: "1px solid rgba(255,255,255,.07)", padding: "10px 12px", background: "rgba(8,12,25,.96)", color: "white", textAlign: "left", cursor: "pointer" }}
+            >
+              <div style={{ fontWeight: 850 }}>{p.name}</div>
+              <div style={{ fontSize: 11, opacity: 0.58, marginTop: 2 }}>{p.id} · {prettyBaseLabel(p.weight_class)}{p.active ? "" : " · inactive"}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, glass, button, pill, green }) {
+  const initialNow = sydneyInputNow();
+  const [winnerId, setWinnerId] = useState("");
+  const [loserId, setLoserId] = useState("");
+  const [arm, setArm] = useState("");
+  const [dateIso, setDateIso] = useState(initialNow.date);
+  const [time, setTime] = useState(initialNow.time);
+  const [backend, setBackend] = useState({ loading: true, ok: false, error: "", timeColumnPresent: false, matchSheet: "" });
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+  const [success, setSuccess] = useState(null);
+  const [duplicate, setDuplicate] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function checkBackend() {
+      setBackend((b) => ({ ...b, loading: true, error: "" }));
+      try {
+        const res = await fetch("/.netlify/functions/add-match", {
+          headers: { "x-match-entry-token": accessToken },
+          cache: "no-store",
+        });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!res.ok || !data.ok) throw new Error(data.error || `Backend check failed (${res.status}).`);
+        setBackend({ loading: false, ok: true, error: "", timeColumnPresent: Boolean(data.timeColumnPresent), matchSheet: data.matchSheet || "" });
+      } catch (e) {
+        if (!cancelled) setBackend({ loading: false, ok: false, error: e?.message || "Could not connect to match-entry backend.", timeColumnPresent: false, matchSheet: "" });
+      }
+    }
+    checkBackend();
+    return () => { cancelled = true; };
+  }, [accessToken]);
+
+  const winner = players.find((p) => p.id === winnerId) || null;
+  const loser = players.find((p) => p.id === loserId) || null;
+  const canSubmit = backend.ok && winner && loser && winnerId !== loserId && arm && dateIso && !submitting;
+
+  async function submitMatch(allowDuplicate = false) {
+    if (!canSubmit && !allowDuplicate) return;
+    setSubmitting(true);
+    setSubmitError("");
+    setSuccess(null);
+    if (!allowDuplicate) setDuplicate(null);
+    try {
+      const res = await fetch("/.netlify/functions/add-match", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-match-entry-token": accessToken,
+        },
+        body: JSON.stringify({ winnerId, loserId, arm, dateIso, time, allowDuplicate }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409 && data.duplicate) {
+        setDuplicate(data);
+        return;
+      }
+      if (!res.ok || !data.ok) throw new Error(data.error || `Match submission failed (${res.status}).`);
+      setSuccess(data);
+      setDuplicate(null);
+      setWinnerId("");
+      setLoserId("");
+      setArm("");
+      setTime(sydneyInputNow().time);
+      await onReload?.();
+    } catch (e) {
+      setSubmitError(e?.message || "Could not add match.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div style={pageStyle}>
+      <style>{`
+        * { box-sizing:border-box; }
+        button, input { font:inherit; }
+        .match-entry-shell { max-width:760px; margin:0 auto; }
+        .match-entry-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+        @media (max-width:680px) { .match-entry-grid { grid-template-columns:1fr; } }
+      `}</style>
+      <div className="match-entry-shell">
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap", marginBottom:16 }}>
+          <div>
+            <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+              <h1 style={{ margin:0, fontSize:"clamp(26px,4vw,37px)", letterSpacing:-.7 }}>Add Match</h1>
+              <span style={{ ...pill, color:backend.ok ? green : backend.loading ? "#fde68a" : "#fecdd3", borderColor:backend.ok ? "rgba(52,211,153,.28)" : "rgba(251,191,36,.3)" }}>
+                {backend.loading ? "● checking connection" : backend.ok ? "● Match sheet connected" : "● backend unavailable"}
+              </span>
+            </div>
+            <div style={{ opacity:.65, fontSize:13, marginTop:4 }}>{CONFIG.branding.clubName} · secure match entry</div>
+          </div>
+          <button type="button" style={button} onClick={onBack}>← Back to rankings</button>
+        </div>
+
+        {!backend.ok && !backend.loading && (
+          <div style={{ ...glass, borderRadius:14, padding:13, marginBottom:14, borderColor:"rgba(251,113,133,.42)", color:"#fecdd3" }}>
+            <strong>Setup issue:</strong> {backend.error}
+          </div>
+        )}
+
+        {backend.ok && !backend.timeColumnPresent && (
+          <div style={{ ...glass, borderRadius:14, padding:12, marginBottom:14, borderColor:"rgba(251,191,36,.25)", color:"#fde68a", fontSize:12 }}>
+            The Match sheet has no <strong>Time</strong> column. Matches will still be added correctly and same-day ordering still uses sheet row order; add a <strong>Time</strong> column at the far right if you want the entered time stored too.
+          </div>
+        )}
+
+        {success && (
+          <div style={{ ...glass, borderRadius:15, padding:14, marginBottom:14, borderColor:"rgba(52,211,153,.34)", background:"rgba(52,211,153,.07)" }}>
+            <div style={{ fontWeight:900, color:"#bbf7d0" }}>✅ Match added{success.row ? ` · Match sheet row ${success.row}` : ""}</div>
+            <div style={{ fontSize:12, opacity:.72, marginTop:4 }}>{success.winnerId} defeated {success.loserId} · {success.arm} · {success.dateWritten}</div>
+            {success.editUrl && <a href={success.editUrl} target="_blank" rel="noreferrer" style={{ display:"inline-block", marginTop:8, color:"white", fontSize:12 }}>Open added row ↗</a>}
+          </div>
+        )}
+
+        {submitError && (
+          <div style={{ ...glass, borderRadius:14, padding:13, marginBottom:14, borderColor:"rgba(251,113,133,.42)", color:"#fecdd3" }}>
+            <strong>Could not add match:</strong> {submitError}
+          </div>
+        )}
+
+        {duplicate && (
+          <div style={{ ...glass, borderRadius:15, padding:14, marginBottom:14, borderColor:"rgba(251,191,36,.34)", background:"rgba(251,191,36,.06)" }}>
+            <div style={{ fontWeight:900, color:"#fde68a" }}>⚠ Possible duplicate</div>
+            <div style={{ fontSize:12.5, opacity:.76, marginTop:5 }}>{duplicate.error}</div>
+            <div style={{ display:"flex", gap:8, marginTop:10, flexWrap:"wrap" }}>
+              <button type="button" style={button} onClick={() => setDuplicate(null)}>Cancel</button>
+              <button type="button" style={{ ...button, borderColor:"rgba(251,191,36,.48)", color:"#fde68a" }} disabled={submitting} onClick={() => submitMatch(true)}>Add anyway</button>
+            </div>
+          </div>
+        )}
+
+        <div style={{ ...glass, borderRadius:20, padding:"16px", overflow:"visible" }}>
+          <div className="match-entry-grid">
+            <CompetitorMatchPicker label="Winner" players={players} selectedId={winnerId} onSelect={setWinnerId} excludedId={loserId} glass={glass} />
+            <CompetitorMatchPicker label="Loser" players={players} selectedId={loserId} onSelect={setLoserId} excludedId={winnerId} glass={glass} />
+          </div>
+
+          <div style={{ marginTop:16 }}>
+            <div style={{ fontSize:11, opacity:.62, textTransform:"uppercase", letterSpacing:1, marginBottom:7 }}>Arm</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+              {["RIGHT", "LEFT"].map((a) => (
+                <button key={a} type="button" onClick={() => setArm(a)} style={{ ...button, padding:"12px", borderColor:arm === a ? "rgba(245,197,66,.58)" : "rgba(255,255,255,.16)", color:arm === a ? "#ffe792" : "white", background:arm === a ? "rgba(245,197,66,.12)" : "rgba(255,255,255,.07)" }}>
+                  {a === "RIGHT" ? "Right arm" : "Left arm"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="match-entry-grid" style={{ marginTop:16 }}>
+            <label>
+              <span style={{ display:"block", fontSize:11, opacity:.62, textTransform:"uppercase", letterSpacing:1, marginBottom:6 }}>Date</span>
+              <input type="date" value={dateIso} max={sydneyInputNow().date} onChange={(e) => setDateIso(e.target.value)} style={{ width:"100%", padding:"11px", borderRadius:10, border:"1px solid rgba(255,255,255,.15)", background:"rgba(0,0,0,.2)", color:"white" }} />
+            </label>
+            <label>
+              <span style={{ display:"block", fontSize:11, opacity:.62, textTransform:"uppercase", letterSpacing:1, marginBottom:6 }}>Time</span>
+              <input type="time" value={time} onChange={(e) => setTime(e.target.value)} style={{ width:"100%", padding:"11px", borderRadius:10, border:"1px solid rgba(255,255,255,.15)", background:"rgba(0,0,0,.2)", color:"white" }} />
+            </label>
+          </div>
+
+          <div style={{ marginTop:17, padding:"11px 12px", borderRadius:12, background:"rgba(255,255,255,.045)", fontSize:12, lineHeight:1.5 }}>
+            {winner && loser ? (
+              <><strong>{winner.name}</strong> defeated <strong>{loser.name}</strong>{arm ? ` · ${arm === "RIGHT" ? "Right" : "Left"} arm` : " · choose an arm"}</>
+            ) : <span style={{ opacity:.58 }}>Choose the winner, loser and arm. IDs are inserted automatically from the Competitor sheet.</span>}
+          </div>
+
+          <button
+            type="button"
+            disabled={!canSubmit}
+            onClick={() => submitMatch(false)}
+            style={{ ...button, width:"100%", marginTop:12, padding:"13px 14px", fontSize:14, opacity:canSubmit ? 1 : .45, cursor:canSubmit ? "pointer" : "not-allowed", background:canSubmit ? "rgba(52,211,153,.12)" : "rgba(255,255,255,.05)", borderColor:canSubmit ? "rgba(52,211,153,.38)" : "rgba(255,255,255,.12)", color:canSubmit ? "#bbf7d0" : "white" }}
+          >
+            {submitting ? "Adding match…" : "Add match"}
+          </button>
+
+          <div style={{ opacity:.46, fontSize:10.5, lineHeight:1.45, marginTop:9, textAlign:"center" }}>
+            The backend re-checks the competitor IDs, sheet headers, date, arm and duplicates before anything is written. Badge? is left blank for a normal public match.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 /* ===================== APP ===================== */
 export default function App() {
   const [players, setPlayers] = useState([]);
@@ -793,6 +1086,8 @@ export default function App() {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("admin") === "1";
   });
+  const [matchEntryToken, setMatchEntryToken] = useState(initialMatchEntryToken);
+  const matchEntryMode = Boolean(matchEntryToken);
 
   async function loadAll() {
     setError("");
@@ -990,7 +1285,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const onPopState = () => setAdminMode(new URLSearchParams(window.location.search).get("admin") === "1");
+    const onPopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      setAdminMode(params.get("admin") === "1");
+      setMatchEntryToken(params.get("match-entry") || "");
+    };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
@@ -1002,6 +1301,16 @@ export default function App() {
     else url.searchParams.delete("admin");
     window.history.pushState({}, "", url);
     setAdminMode(enabled);
+    setSelectedPlayerId(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function closeMatchEntryPage() {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("match-entry");
+    window.history.pushState({}, "", url);
+    setMatchEntryToken("");
     setSelectedPlayerId(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -1312,6 +1621,22 @@ export default function App() {
 
   const searchLower = searchTerm.trim().toLowerCase();
 
+
+  if (matchEntryMode) {
+    return (
+      <MatchEntryPage
+        players={players}
+        accessToken={matchEntryToken}
+        onBack={closeMatchEntryPage}
+        onReload={loadAll}
+        pageStyle={pageStyle}
+        glass={glass}
+        button={button}
+        pill={pill}
+        green={green}
+      />
+    );
+  }
 
   if (adminMode) {
     const filteredIssues = dataIssues.filter((issue) =>
