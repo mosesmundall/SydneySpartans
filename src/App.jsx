@@ -1105,26 +1105,71 @@ function buildInitialRankReplayFrames(players, matches) {
 
   const beforeWindow = sorted.filter((m) => m._parsedDate < cutoff);
   const recent = sorted.filter((m) => m._parsedDate >= cutoff);
-  const working = beforeWindow.slice();
-  let data = computeLaddersThroughDate(players, working, CONFIG.weightClasses, null);
+
+  /*
+   * Replay baseline rule:
+   *
+   * Badge? = FALSE is a hidden/manual ranking adjustment. It must never look
+   * like a public match happened during the 30-day replay.
+   *
+   * Start with the historical state from before the 30-day window, then silently
+   * pre-apply EVERY suppressed adjustment inside the window. That corrected state
+   * is what the viewer sees before the replay begins.
+   */
+  const recentSuppressed = recent.filter((m) => m._badgeSuppressed);
+  const baselineMatches = [...beforeWindow, ...recentSuppressed].sort((a, b) => {
+    const at = a._parsedDate.getTime();
+    const bt = b._parsedDate.getTime();
+    if (at !== bt) return at - bt;
+    return (a._rowIndex ?? 0) - (b._rowIndex ?? 0);
+  });
+
+  const baselineData = computeLaddersThroughDate(
+    players,
+    baselineMatches,
+    CONFIG.weightClasses,
+    null
+  );
 
   const frames = Object.fromEntries(
     CONFIG.weightClasses.map((wc) => [
       wc,
-      [{ items: animationDisplayLadder(wc, data.ladders[wc] || []), event: null, animate: false }],
+      [
+        {
+          items: animationDisplayLadder(wc, baselineData.ladders[wc] || []),
+          event: null,
+          animate: false,
+        },
+      ],
     ])
   );
 
-  recent.forEach((match) => {
-    working.push(match);
-    data = computeLaddersThroughDate(players, working, CONFIG.weightClasses, null);
+  /*
+   * Separately walk through the true chronological history only to discover
+   * which PUBLIC takeover/defense events occurred. Those records power the
+   * takeover/defense glows. Hidden matches never create an animation event.
+   */
+  const chronologicalWorking = beforeWindow.slice();
 
-    // Hidden ranking adjustments still alter the internal state, but never receive a visible replay frame.
+  recent.forEach((match) => {
+    chronologicalWorking.push(match);
+
+    const data = computeLaddersThroughDate(
+      players,
+      chronologicalWorking,
+      CONFIG.weightClasses,
+      null
+    );
+
     if (match._badgeSuppressed) return;
 
-    const events = (data.eventLog || []).filter((e) => e.matchKey === match._stableKey);
+    const events = (data.eventLog || []).filter(
+      (e) => e.matchKey === match._stableKey
+    );
+
     events.forEach((event) => {
       if (!frames[event.wc]) return;
+
       frames[event.wc].push({
         items: animationDisplayLadder(event.wc, data.ladders[event.wc] || []),
         event,
@@ -1133,15 +1178,29 @@ function buildInitialRankReplayFrames(players, matches) {
     });
   });
 
-  // A hidden adjustment may occur after the final public event. End every replay on the real current order,
-  // but make that final correction silently so Badge? = FALSE remains visually invisible.
-  const finalData = computeLaddersThroughDate(players, sorted, CONFIG.weightClasses, null);
+  // Finish on the exact real current ranking, including all hidden adjustments.
+  const finalData = computeLaddersThroughDate(
+    players,
+    sorted,
+    CONFIG.weightClasses,
+    null
+  );
+
   CONFIG.weightClasses.forEach((wc) => {
-    const finalItems = animationDisplayLadder(wc, finalData.ladders[wc] || []);
+    const finalItems = animationDisplayLadder(
+      wc,
+      finalData.ladders[wc] || []
+    );
+
     const list = frames[wc] || [];
     const last = list[list.length - 1]?.items || [];
+
     if (rankOrderSignature(last) !== rankOrderSignature(finalItems)) {
-      list.push({ items: finalItems, event: null, animate: false });
+      list.push({
+        items: finalItems,
+        event: null,
+        animate: false,
+      });
     }
   });
 
@@ -1220,8 +1279,8 @@ function AnimatedRankRows({
 
     /*
      * Historical replay is intentionally COLLAPSED into one calm transition:
-     * show the ranking as it stood at the start of the 30-day window, then let
-     * every changed row float into its current place together. This avoids a
+     * show the corrected 30-day baseline with hidden/manual adjustments already baked in,
+     * then let the public-match movement float into its current place together. This avoids a
      * busy card "machine-gunning" through every intermediate match result.
      *
      * Public takeover/defense events are still remembered so the competitors
