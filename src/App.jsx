@@ -1249,7 +1249,7 @@ function AnimatedRankRows({
 
     const observer = new IntersectionObserver(
       ([entry]) => setInView(Boolean(entry?.isIntersecting)),
-      { threshold: 0.12 }
+      { threshold: 0.28 }
     );
     observer.observe(node);
     return () => observer.disconnect();
@@ -1258,6 +1258,11 @@ function AnimatedRankRows({
   useEffect(() => {
     return () => {
       if (replayTimerRef.current) clearTimeout(replayTimerRef.current);
+      const node = containerRef.current;
+      if (node) {
+        node.style.height = "";
+        node.style.overflow = "";
+      }
     };
   }, []);
 
@@ -1294,8 +1299,21 @@ function AnimatedRankRows({
     replayStartedRef.current = true;
 
     const finalFrame = frames[frames.length - 1];
-    replayBaselineOrderRef.current = (frames[0]?.items || []).map((p) => p.id);
-    const finalVisibleItems = (finalFrame.items || []).slice(0, limit);
+    const baselineItems = frames[0]?.items || [];
+    const finalFullItems = finalFrame.items || [];
+    replayBaselineOrderRef.current = baselineItems.map((p) => p.id);
+
+    const baselineVisibleIds = baselineItems.slice(0, limit).map((p) => p.id);
+    let transitionDepth = Math.min(limit, finalFullItems.length);
+
+    // Keep any competitor who started inside the visible top N mounted long
+    // enough to physically slide down and out if the replay bumps them below it.
+    baselineVisibleIds.forEach((id) => {
+      const finalIndex = finalFullItems.findIndex((p) => p.id === id);
+      if (finalIndex >= 0) transitionDepth = Math.max(transitionDepth, finalIndex + 1);
+    });
+
+    const replayTransitionItems = finalFullItems.slice(0, transitionDepth);
     const publicEvents = frames
       .filter((frame) => frame.animate && frame.event)
       .map((frame) => frame.event);
@@ -1311,10 +1329,20 @@ function AnimatedRankRows({
     );
 
     replayTimerRef.current = setTimeout(() => {
+      const node = containerRef.current;
+
+      // Lock the existing baseline list in place. This prevents scroll-triggered
+      // replays from blanking/collapsing the card while React swaps row order.
+      if (node) {
+        const currentHeight = node.getBoundingClientRect().height;
+        node.style.height = `${currentHeight}px`;
+        node.style.overflow = "hidden";
+      }
+
       animateNextRef.current = true;
       animationModeRef.current = "replay";
       pulseEventsRef.current = uniquePulseEvents;
-      setDisplayedItems(finalVisibleItems);
+      setDisplayedItems(replayTransitionItems);
 
       // Mark replay complete after the long float/glow has had time to finish.
       replayTimerRef.current = setTimeout(() => {
@@ -1322,8 +1350,17 @@ function AnimatedRankRows({
         animateNextRef.current = false;
         animationModeRef.current = "none";
         pulseEventsRef.current = [];
-        // Sync to the latest live data in case the sheet changed during replay.
+
+        // Sync to the latest live top-N data. Release the temporary clip only
+        // after React has committed the settled ranking.
         setDisplayedItems(items);
+        requestAnimationFrame(() => {
+          const currentNode = containerRef.current;
+          if (currentNode) {
+            currentNode.style.height = "";
+            currentNode.style.overflow = "";
+          }
+        });
       }, 2500);
     }, 360);
   }, [inView, displayMode]);
@@ -1396,10 +1433,16 @@ function AnimatedRankRows({
           if (oldIndex >= 0 && newIndex >= 0) {
             // Visible baseline rows use their exact previous DOM position.
             // Someone who was below the displayed cutoff starts at the bottom edge.
-            if (oldIndex < limit && oldRect) {
-              dy = oldRect.top - newRect.top;
+            if (oldIndex < limit) {
+              // Prefer the exact previous DOM coordinate when available, but
+              // fall back to rank-index geometry for cards that were off-screen.
+              dy = oldRect
+                ? oldRect.top - newRect.top
+                : (oldIndex - newIndex) * rowPitch;
             } else {
-              const visualOldIndex = Math.min(oldIndex, Math.max(0, limit - 1));
+              // A climber that started below the displayed cutoff enters from
+              // the bottom edge and travels upward to the rank they earned.
+              const visualOldIndex = Math.max(0, limit - 1);
               dy = (visualOldIndex - newIndex) * rowPitch;
             }
             hasOrigin = true;
@@ -1434,8 +1477,9 @@ function AnimatedRankRows({
           return;
         }
 
-        if (!hasOrigin) {
-          // A genuinely new visible row enters from the bottom of the ranking.
+        if (!hasOrigin && !isReplay) {
+          // Only genuinely LIVE rows may use an entry animation. Historical
+          // scroll-in replay never fades or lifts an entire list into view.
           const newIndex = Math.max(0, finalOrder.indexOf(key));
           const fromBottom = Math.max(
             rowPitch,
@@ -1445,7 +1489,7 @@ function AnimatedRankRows({
           el.animate(
             [
               {
-                opacity: 0.2,
+                opacity: 0.45,
                 transform: `translate3d(0, ${fromBottom}px, 0)`,
                 zIndex: 5,
               },
@@ -1463,8 +1507,8 @@ function AnimatedRankRows({
           );
         }
 
-        // dy === 0 means the competitor was already in this exact rank:
-        // leave that row completely stationary.
+        // Replay rule: no baseline origin = no movement. An unchanged competitor
+        // also has dy === 0 and remains perfectly stationary.
       });
 
       (pulseEventsRef.current || []).forEach((event) => {
