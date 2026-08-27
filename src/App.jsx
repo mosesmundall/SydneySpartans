@@ -1213,6 +1213,7 @@ function AnimatedRankRows({
   replayFrames,
   displayMode,
   liveEvents,
+  limit = 10,
   onSelect,
   getRowClass,
   renderRow,
@@ -1228,10 +1229,12 @@ function AnimatedRankRows({
   const pulseEventsRef = useRef([]);
   const [inView, setInView] = useState(false);
 
-  const initialItems = !displayMode && (replayFrames || []).length > 1
+  const baselineFullItems = !displayMode && (replayFrames || []).length > 1
     ? replayFrames[0].items
     : items;
+  const initialItems = baselineFullItems.slice(0, limit);
   const [displayedItems, setDisplayedItems] = useState(initialItems);
+  const replayBaselineOrderRef = useRef((baselineFullItems || []).map((p) => p.id));
 
   const currentSignature = rankOrderSignature(items);
   const liveSignature = (liveEvents || []).map(rankAnimationEventKey).join("||");
@@ -1291,6 +1294,8 @@ function AnimatedRankRows({
     replayStartedRef.current = true;
 
     const finalFrame = frames[frames.length - 1];
+    replayBaselineOrderRef.current = (frames[0]?.items || []).map((p) => p.id);
+    const finalVisibleItems = (finalFrame.items || []).slice(0, limit);
     const publicEvents = frames
       .filter((frame) => frame.animate && frame.event)
       .map((frame) => frame.event);
@@ -1309,7 +1314,7 @@ function AnimatedRankRows({
       animateNextRef.current = true;
       animationModeRef.current = "replay";
       pulseEventsRef.current = uniquePulseEvents;
-      setDisplayedItems(finalFrame.items);
+      setDisplayedItems(finalVisibleItems);
 
       // Mark replay complete after the long float/glow has had time to finish.
       replayTimerRef.current = setTimeout(() => {
@@ -1361,52 +1366,93 @@ function AnimatedRankRows({
         ? "cubic-bezier(.22,.72,.18,1)"
         : "cubic-bezier(.18,.82,.20,1)";
 
+      // Estimate the vertical spacing of one ranking row.
+      let rowPitch = 54;
+      if (elements.length >= 2) {
+        const a = nextRects.get(elements[0].dataset.rankKey);
+        const b = nextRects.get(elements[1].dataset.rankKey);
+        if (a && b && Math.abs(b.top - a.top) > 20) rowPitch = Math.abs(b.top - a.top);
+      } else if (elements[0]) {
+        const only = nextRects.get(elements[0].dataset.rankKey);
+        if (only?.height) rowPitch = only.height + 2;
+      }
+
+      const baselineOrder = replayBaselineOrderRef.current || [];
+      const finalOrder = displayedItems.map((p) => p.id);
+
       elements.forEach((el) => {
         const key = el.dataset.rankKey;
         const oldRect = oldRects.get(key);
         const newRect = nextRects.get(key);
         if (!newRect) return;
 
-        if (oldRect) {
-          const dy = oldRect.top - newRect.top;
+        let dy = 0;
+        let hasOrigin = false;
 
-          if (Math.abs(dy) > 1) {
-            el.animate(
-              [
-                {
-                  transform: `translate3d(0, ${dy}px, 0)`,
-                  zIndex: 4,
-                },
-                {
-                  transform: "translate3d(0, 0, 0)",
-                  zIndex: 4,
-                },
-              ],
-              {
-                duration: moveDuration,
-                easing,
-                fill: "both",
-              }
-            );
+        if (isReplay) {
+          const oldIndex = baselineOrder.indexOf(key);
+          const newIndex = finalOrder.indexOf(key);
 
-            // During historical replay, avoid lighting up every displaced row.
-            // The smooth physical movement is enough; only actual event winners glow.
-            if (!isReplay) {
-              el.classList.add(dy > 0 ? "fx-live-up" : "fx-live-down");
+          if (oldIndex >= 0 && newIndex >= 0) {
+            // Visible baseline rows use their exact previous DOM position.
+            // Someone who was below the displayed cutoff starts at the bottom edge.
+            if (oldIndex < limit && oldRect) {
+              dy = oldRect.top - newRect.top;
+            } else {
+              const visualOldIndex = Math.min(oldIndex, Math.max(0, limit - 1));
+              dy = (visualOldIndex - newIndex) * rowPitch;
             }
+            hasOrigin = true;
           }
-        } else {
+        } else if (oldRect) {
+          dy = oldRect.top - newRect.top;
+          hasOrigin = true;
+        }
+
+        if (hasOrigin && Math.abs(dy) > 1) {
           el.animate(
             [
               {
-                opacity: 0,
-                transform: isReplay
-                  ? "translate3d(0, 18px, 0) scale(.99)"
-                  : "translate3d(0, 12px, 0) scale(.985)",
+                transform: `translate3d(0, ${dy}px, 0)`,
+                zIndex: 4,
+              },
+              {
+                transform: "translate3d(0, 0, 0)",
+                zIndex: 4,
+              },
+            ],
+            {
+              duration: moveDuration,
+              easing,
+              fill: "both",
+            }
+          );
+
+          if (!isReplay) {
+            el.classList.add(dy > 0 ? "fx-live-up" : "fx-live-down");
+          }
+          return;
+        }
+
+        if (!hasOrigin) {
+          // A genuinely new visible row enters from the bottom of the ranking.
+          const newIndex = Math.max(0, finalOrder.indexOf(key));
+          const fromBottom = Math.max(
+            rowPitch,
+            (Math.max(0, limit - 1) - newIndex) * rowPitch
+          );
+
+          el.animate(
+            [
+              {
+                opacity: 0.2,
+                transform: `translate3d(0, ${fromBottom}px, 0)`,
+                zIndex: 5,
               },
               {
                 opacity: 1,
-                transform: "translate3d(0, 0, 0) scale(1)",
+                transform: "translate3d(0, 0, 0)",
+                zIndex: 5,
               },
             ],
             {
@@ -1416,6 +1462,9 @@ function AnimatedRankRows({
             }
           );
         }
+
+        // dy === 0 means the competitor was already in this exact rank:
+        // leave that row completely stationary.
       });
 
       (pulseEventsRef.current || []).forEach((event) => {
@@ -2545,15 +2594,9 @@ export default function App() {
                     <AnimatedRankRows
                       wc={wc}
                       items={filtered}
-                      replayFrames={
-                        searchLower
-                          ? []
-                          : (initialReplayFrames?.[wc] || []).map((frame) => ({
-                              ...frame,
-                              items: frame.items.slice(0, 15),
-                            }))
-                      }
+                      replayFrames={searchLower ? [] : (initialReplayFrames?.[wc] || [])}
                       displayMode={displayMode}
+                      limit={15}
                       liveEvents={liveEvents.filter((event) => event.wc === wc)}
                       onSelect={setSelectedPlayerId}
                       getRowClass={(p) => {
