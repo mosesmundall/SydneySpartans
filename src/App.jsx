@@ -2635,19 +2635,19 @@ export default function App() {
 
         .rank-shell.display-mode .topbar {
           flex:0 0 auto;
-          min-height:46px;
-          margin-bottom:8px;
-          gap:10px;
+          min-height:40px;
+          margin-bottom:5px;
+          gap:9px;
           flex-wrap:nowrap;
         }
         .rank-shell.display-mode .topbar h1 {
-          font-size:clamp(20px,1.5vw,28px)!important;
+          font-size:clamp(19px,1.42vw,26px)!important;
           white-space:nowrap;
         }
         .rank-shell.display-mode .brand-logo {
-          width:46px;
-          height:46px;
-          border-radius:12px;
+          width:40px;
+          height:40px;
+          border-radius:11px;
         }
 
         .rank-shell.display-mode .rank-grid {
@@ -2663,44 +2663,96 @@ export default function App() {
 
 
         /*
-         * Sydney overview: 14 ladders across a 5 × 3 board.
-         * This trades one unused grid slot for much wider cards and substantially
-         * larger names while still keeping all 15 places on one 16:9 viewport.
+         * Sydney scoreboard overview:
+         * - 4 cards across × 4 rows = much wider, readable cards.
+         * - Long ladders split internally: #1–8 left, #9–15 right.
+         * - Ladders with 10 or fewer visible competitors remain single-column.
+         * - Youth Right/Left span two columns each to fill the final row.
+         *
+         * This uses BOTH screen dimensions instead of forcing 15 tiny rows into
+         * every card.
          */
         .rank-shell.theme-sydney.display-mode .rank-grid {
-          grid-template-columns:repeat(5,minmax(0,1fr));
-          grid-template-rows:repeat(3,minmax(0,1fr));
-          gap:8px;
-        }
-        .rank-shell.theme-sydney.display-mode .rank-row {
-          min-height:clamp(12px,1.62vh,20px);
-          padding:clamp(1px,.16vh,2px) 6px;
+          grid-template-columns:repeat(4,minmax(0,1fr));
+          grid-template-rows:repeat(4,minmax(0,1fr));
           gap:6px;
-          font-size:clamp(8.5px,1.18vh,13px);
-          letter-spacing:.02px;
         }
-        .rank-shell.theme-sydney.display-mode .rank-num {
-          width:clamp(14px,1.62vh,20px);
-          height:clamp(14px,1.62vh,20px);
-          flex-basis:clamp(14px,1.62vh,20px);
-          border-radius:6px;
-          font-size:clamp(8px,.96vh,10.5px);
+
+        /* Fill the final row instead of leaving two dead grid cells. */
+        .rank-shell.theme-sydney.display-mode .rank-card:nth-child(13),
+        .rank-shell.theme-sydney.display-mode .rank-card:nth-child(14) {
+          grid-column:span 2;
         }
+
         .rank-shell.theme-sydney.display-mode .rank-card-header {
-          padding:clamp(4px,.58vh,7px) 8px!important;
+          padding:4px 7px!important;
+          min-height:28px;
         }
         .rank-shell.theme-sydney.display-mode .rank-card-title {
-          font-size:clamp(9.5px,1.18vh,13.5px)!important;
-          line-height:1.08;
+          font-size:clamp(10.5px,1.28vh,14px)!important;
+          line-height:1.06;
         }
         .rank-shell.theme-sydney.display-mode .rank-card-body {
-          padding:3px 6px!important;
+          padding:3px 5px!important;
         }
         .rank-shell.theme-sydney.display-mode .champ-photo {
-          width:clamp(25px,2.9vh,34px);
-          height:clamp(25px,2.9vh,34px);
+          width:clamp(24px,2.75vh,31px);
+          height:clamp(24px,2.75vh,31px);
         }
-        
+
+        /*
+         * The key space-saving change: distribute a 15-place ladder into two
+         * vertical columns. Grid-auto-flow:column means DOM/ranking order stays
+         * #1,#2,... while it renders #1–8 left and #9–15 right.
+         *
+         * Live rank movement never occurs in this compact overview; Display Mode
+         * first expands affected ladder(s) into presentation-focus, where the list
+         * returns to the normal single-column layout before movement is released.
+         */
+        .rank-shell.theme-sydney.display-mode:not(.presentation-focus):not(.presentation-focus-prep):not(.presentation-return-prep) .rank-card:not(.overview-single-column) .animated-rank-list {
+          display:grid;
+          grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+          grid-template-rows:repeat(8,minmax(0,1fr));
+          grid-auto-flow:column;
+          column-gap:8px;
+          row-gap:1px;
+          height:100%;
+          align-content:start;
+        }
+
+        .rank-shell.theme-sydney.display-mode:not(.presentation-focus):not(.presentation-focus-prep):not(.presentation-return-prep) .rank-card:not(.overview-single-column) .animated-rank-list .rank-row {
+          margin-top:0!important;
+          min-width:0;
+        }
+
+        /* Short ladders look cleaner using the full card width. */
+        .rank-shell.theme-sydney.display-mode .rank-card.overview-single-column .animated-rank-list {
+          display:block;
+        }
+
+        .rank-shell.theme-sydney.display-mode .rank-row {
+          min-height:clamp(17px,1.95vh,23px);
+          padding:clamp(1.5px,.24vh,3px) 6px;
+          gap:6px;
+          font-size:clamp(10px,1.34vh,14px);
+          letter-spacing:.01px;
+        }
+        .rank-shell.theme-sydney.display-mode .rank-num {
+          width:clamp(17px,1.85vh,22px);
+          height:clamp(17px,1.85vh,22px);
+          flex-basis:clamp(17px,1.85vh,22px);
+          border-radius:6px;
+          font-size:clamp(8.5px,1.05vh,11px);
+        }
+
+        /* In focus mode always restore a normal large single-column ladder. */
+        .rank-shell.theme-sydney.display-mode.presentation-focus .animated-rank-list,
+        .rank-shell.theme-sydney.display-mode.presentation-focus-prep .animated-rank-list,
+        .rank-shell.theme-sydney.display-mode.presentation-return-prep .animated-rank-list {
+          display:block!important;
+          height:auto;
+        }
+
 
         .rank-shell.display-mode .rank-card {
           min-width:0;
@@ -2788,19 +2840,26 @@ export default function App() {
           }
 
           .rank-shell.theme-sydney.display-mode .rank-row {
-            min-height:12px;
-            font-size:clamp(8px,1.12vh,10.5px);
+            min-height:15px;
+            font-size:clamp(9px,1.3vh,11.5px);
             padding:1px 5px;
           }
           .rank-shell.theme-sydney.display-mode .rank-num {
-            width:13px;
-            height:13px;
-            flex-basis:13px;
-            font-size:8px;
+            width:15px;
+            height:15px;
+            flex-basis:15px;
+            font-size:8.5px;
+          }
+          .rank-shell.theme-sydney.display-mode .rank-card-header {
+            min-height:24px;
+            padding:3px 6px!important;
+          }
+          .rank-shell.theme-sydney.display-mode .rank-card-title {
+            font-size:clamp(9.5px,1.2vh,12px)!important;
           }
           .rank-shell.theme-sydney.display-mode .champ-photo {
-            width:24px;
-            height:24px;
+            width:22px;
+            height:22px;
           }
 
           .rank-shell.theme-newcastle.display-mode .rank-row {
@@ -2854,6 +2913,12 @@ export default function App() {
         .rank-shell.display-mode.presentation-focus .rank-grid {
           opacity:1;
           filter:none;
+        }
+
+        .rank-shell.theme-sydney.display-mode.presentation-focus .rank-card.focus-target,
+        .rank-shell.theme-sydney.display-mode.presentation-focus-prep .rank-card.focus-target,
+        .rank-shell.theme-sydney.display-mode.presentation-return-prep .rank-card.focus-target {
+          grid-column:auto!important;
         }
 
         .rank-shell.display-mode.presentation-focus .rank-card.focus-target {
@@ -3266,7 +3331,7 @@ export default function App() {
             return (
               <section
                 key={wc}
-                className={`rank-card ${displayFocusActive && displayFocusClasses.includes(wc) ? "focus-target" : ""}`}
+                className={`rank-card ${displayMode && filtered.length <= 10 ? "overview-single-column" : ""} ${displayFocusActive && displayFocusClasses.includes(wc) ? "focus-target" : ""}`}
                 style={{ ...cardStyle, animationDelay: `${Math.min(cardIndex * 35, 280)}ms` }}
               >
                 <div className="rank-card-header" style={{ padding: "13px 14px", borderBottom: "1px solid rgba(255,255,255,.09)" }}>
