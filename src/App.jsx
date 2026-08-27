@@ -2635,19 +2635,19 @@ export default function App() {
 
         .rank-shell.display-mode .topbar {
           flex:0 0 auto;
-          min-height:42px;
-          margin-bottom:7px;
-          gap:9px;
+          min-height:46px;
+          margin-bottom:8px;
+          gap:10px;
           flex-wrap:nowrap;
         }
         .rank-shell.display-mode .topbar h1 {
-          font-size:clamp(18px,1.35vw,25px)!important;
+          font-size:clamp(20px,1.5vw,28px)!important;
           white-space:nowrap;
         }
         .rank-shell.display-mode .brand-logo {
-          width:42px;
-          height:42px;
-          border-radius:11px;
+          width:46px;
+          height:46px;
+          border-radius:12px;
         }
 
         .rank-shell.display-mode .rank-grid {
@@ -2662,22 +2662,43 @@ export default function App() {
         }
 
 
+        /*
+         * Sydney overview: 14 ladders across a 5 × 3 board.
+         * This trades one unused grid slot for much wider cards and substantially
+         * larger names while still keeping all 15 places on one 16:9 viewport.
+         */
         .rank-shell.theme-sydney.display-mode .rank-grid {
-          grid-template-columns:repeat(7,minmax(0,1fr));
-          grid-template-rows:repeat(2,minmax(0,1fr));
+          grid-template-columns:repeat(5,minmax(0,1fr));
+          grid-template-rows:repeat(3,minmax(0,1fr));
+          gap:8px;
         }
         .rank-shell.theme-sydney.display-mode .rank-row {
-          min-height:19px;
-          padding:1.5px 4px;
-          gap:5px;
-          font-size:clamp(8px,.56vw,10.5px);
+          min-height:clamp(12px,1.62vh,20px);
+          padding:clamp(1px,.16vh,2px) 6px;
+          gap:6px;
+          font-size:clamp(8.5px,1.18vh,13px);
+          letter-spacing:.02px;
         }
         .rank-shell.theme-sydney.display-mode .rank-num {
-          width:19px;
-          height:19px;
-          flex-basis:19px;
+          width:clamp(14px,1.62vh,20px);
+          height:clamp(14px,1.62vh,20px);
+          flex-basis:clamp(14px,1.62vh,20px);
           border-radius:6px;
-          font-size:9px;
+          font-size:clamp(8px,.96vh,10.5px);
+        }
+        .rank-shell.theme-sydney.display-mode .rank-card-header {
+          padding:clamp(4px,.58vh,7px) 8px!important;
+        }
+        .rank-shell.theme-sydney.display-mode .rank-card-title {
+          font-size:clamp(9.5px,1.18vh,13.5px)!important;
+          line-height:1.08;
+        }
+        .rank-shell.theme-sydney.display-mode .rank-card-body {
+          padding:3px 6px!important;
+        }
+        .rank-shell.theme-sydney.display-mode .champ-photo {
+          width:clamp(25px,2.9vh,34px);
+          height:clamp(25px,2.9vh,34px);
         }
         
 
@@ -2733,8 +2754,8 @@ export default function App() {
           display:none;
         }
         .rank-shell.display-mode .champ-photo {
-          width:28px;
-          height:28px;
+          width:30px;
+          height:30px;
           border-width:1px;
           box-shadow:0 0 0 2px rgba(245,197,66,.08),0 4px 12px rgba(0,0,0,.25);
         }
@@ -2752,6 +2773,51 @@ export default function App() {
           transition:opacity .18s ease;
         }
         .rank-shell.display-mode .display-mode-toggle:hover { opacity:1; }
+
+        @media (max-height:760px) {
+          .rank-shell.display-mode .topbar {
+            min-height:38px;
+            margin-bottom:5px;
+          }
+          .rank-shell.display-mode .brand-logo {
+            width:38px;
+            height:38px;
+          }
+          .rank-shell.display-mode .topbar h1 {
+            font-size:clamp(17px,1.35vw,23px)!important;
+          }
+
+          .rank-shell.theme-sydney.display-mode .rank-row {
+            min-height:12px;
+            font-size:clamp(8px,1.12vh,10.5px);
+            padding:1px 5px;
+          }
+          .rank-shell.theme-sydney.display-mode .rank-num {
+            width:13px;
+            height:13px;
+            flex-basis:13px;
+            font-size:8px;
+          }
+          .rank-shell.theme-sydney.display-mode .champ-photo {
+            width:24px;
+            height:24px;
+          }
+
+          .rank-shell.theme-newcastle.display-mode .rank-row {
+            min-height:21px;
+            font-size:clamp(10px,1.42vh,13px);
+            padding:3px 8px;
+          }
+          .rank-shell.theme-newcastle.display-mode .rank-num {
+            width:22px;
+            height:22px;
+            flex-basis:22px;
+          }
+          .rank-shell.theme-newcastle.display-mode .champ-photo {
+            width:30px;
+            height:30px;
+          }
+        }
 
         /* Stage 1: result card appears while the whole board darkens. */
         .rank-shell.display-mode.presentation-announcement .rank-grid {
