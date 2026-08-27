@@ -1340,6 +1340,7 @@ function AnimatedRankRows({
   displayMode,
   liveEvents,
   holdLiveUpdate = false,
+  layoutEpoch = "",
   limit = 10,
   onSelect,
   getRowClass,
@@ -1508,6 +1509,17 @@ function AnimatedRankRows({
       setDisplayedItems(items);
     }
   }, [currentSignature, liveSignature, holdLiveUpdate]);
+
+  useLayoutEffect(() => {
+    const node = containerRef.current;
+    if (!node) return;
+
+    const rects = new Map();
+    Array.from(node.querySelectorAll("[data-rank-key]")).forEach((el) => {
+      rects.set(el.dataset.rankKey, el.getBoundingClientRect());
+    });
+    previousRectsRef.current = rects;
+  }, [layoutEpoch]);
 
   useLayoutEffect(() => {
     const node = containerRef.current;
@@ -1752,7 +1764,10 @@ export default function App() {
   const [displayAnnouncement, setDisplayAnnouncement] = useState(null);
   const [displayAnnouncementVisible, setDisplayAnnouncementVisible] = useState(false);
   const [displayLiveGateOpen, setDisplayLiveGateOpen] = useState(true);
+  const [displayFocusClasses, setDisplayFocusClasses] = useState([]);
+  const [displayPresentationStage, setDisplayPresentationStage] = useState("idle");
   const displayHandledLiveSignatureRef = useRef("");
+  const displaySequenceTimersRef = useRef([]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1764,9 +1779,13 @@ export default function App() {
       setSelectedPlayerId(null);
       setShowActivity(false);
     } else {
+      displaySequenceTimersRef.current.forEach(clearTimeout);
+      displaySequenceTimersRef.current = [];
       setDisplayAnnouncement(null);
       setDisplayAnnouncementVisible(false);
       setDisplayLiveGateOpen(true);
+      setDisplayFocusClasses([]);
+      setDisplayPresentationStage("idle");
       displayHandledLiveSignatureRef.current = "";
     }
   }, [displayMode]);
@@ -2068,33 +2087,81 @@ export default function App() {
       : liveEvents;
 
   useEffect(() => {
-    if (!displayMode || !displayLiveSignature) return undefined;
-    if (displayHandledLiveSignatureRef.current === displayLiveSignature) return undefined;
+    if (!displayMode || !displayLiveSignature) return;
+    if (displayHandledLiveSignatureRef.current === displayLiveSignature) return;
 
     const announcement = buildDisplayResultAnnouncement(liveEvents, playerById);
-    if (!announcement) return undefined;
+    if (!announcement) return;
+
+    // Cancel any prior presentation sequence before starting a new one.
+    displaySequenceTimersRef.current.forEach(clearTimeout);
+    displaySequenceTimersRef.current = [];
+
+    const affectedClasses = uniqueBy(
+      (liveEvents || []).map((event) => event.wc).filter(Boolean),
+      (x) => x
+    );
 
     displayHandledLiveSignatureRef.current = displayLiveSignature;
     setDisplayLiveGateOpen(false);
+    setDisplayFocusClasses(affectedClasses);
+    setDisplayPresentationStage("announcement");
     setDisplayAnnouncement(announcement);
     setDisplayAnnouncementVisible(true);
 
-    // Result card gets the stage first. It begins fading, then only after it has
-    // disappeared do we release the actual ladder movement.
-    const hideTimer = setTimeout(() => {
+    const timers = [];
+
+    // 1) Keep the professional result card on-screen first.
+    timers.push(setTimeout(() => {
       setDisplayAnnouncementVisible(false);
-    }, 2400);
+    }, 2250));
 
-    const releaseTimer = setTimeout(() => {
+    // 2) Once the card has faded, fade the full board fully out and silently
+    //    switch the grid to only the affected ladder(s).
+    timers.push(setTimeout(() => {
       setDisplayAnnouncement(null);
-      setDisplayLiveGateOpen(true);
-    }, 3000);
+      setDisplayPresentationStage("focus-prep");
+    }, 2700));
 
-    return () => {
-      clearTimeout(hideTimer);
-      clearTimeout(releaseTimer);
-    };
+    // 3) Fade the affected ladders back in, large and centred.
+    timers.push(setTimeout(() => {
+      setDisplayPresentationStage("focus");
+    }, 3150));
+
+    // 4) Give the focus layout a moment to settle and re-measure before
+    //    releasing the live rank movement itself.
+    timers.push(setTimeout(() => {
+      setDisplayLiveGateOpen(true);
+    }, 3550));
+
+    // 5) Hold the focused result long enough to read the movement/glows.
+    timers.push(setTimeout(() => {
+      setDisplayPresentationStage("return-prep");
+    }, 6650));
+
+    // 6) Restore the full-board overview after it has faded out.
+    timers.push(setTimeout(() => {
+      setDisplayFocusClasses([]);
+      setDisplayPresentationStage("idle");
+    }, 7100));
+
+    displaySequenceTimersRef.current = timers;
   }, [displayMode, displayLiveSignature]);
+
+  useEffect(() => {
+    return () => {
+      displaySequenceTimersRef.current.forEach(clearTimeout);
+      displaySequenceTimersRef.current = [];
+    };
+  }, []);
+
+
+  const displayFocusCount = Math.max(1, displayFocusClasses.length);
+  const displayFocusCols = Math.min(displayFocusCount, 5);
+  const displayFocusActive =
+    displayMode &&
+    displayFocusClasses.length > 0 &&
+    displayPresentationStage !== "idle";
 
 
   const ranksByPlayer = useMemo(() => {
@@ -2321,9 +2388,11 @@ export default function App() {
 
   const pageStyle = {
     minHeight: "100vh",
+    height: displayMode ? "100dvh" : undefined,
+    overflow: displayMode ? "hidden" : undefined,
     background: bgOverlay,
     color: "white",
-    padding: displayMode ? "clamp(10px, 1.2vw, 18px)" : "clamp(14px, 2vw, 26px)",
+    padding: displayMode ? "8px 10px" : "clamp(14px, 2vw, 26px)",
     fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
     backgroundSize: "cover",
     backgroundPosition: "center",
@@ -2553,38 +2622,215 @@ export default function App() {
         .display-mode-toggle input { accent-color:#f5c542; }
 
         /* Professional TV / projector presentation mode */
-        .rank-shell.display-mode { max-width:1900px; }
+        .rank-shell.display-mode {
+          max-width:none;
+          width:100%;
+          height:100%;
+          display:flex;
+          flex-direction:column;
+          overflow:hidden;
+        }
         .rank-shell.display-mode .non-display-ui { display:none!important; }
         .rank-shell.display-mode .desktop-subtitle { display:none!important; }
-        .rank-shell.display-mode .topbar { margin-bottom:12px; gap:16px; }
-        .rank-shell.display-mode .brand-logo { width:70px; height:70px; border-radius:17px; }
-        .rank-shell.display-mode .rank-card { border-radius:16px; }
+
+        .rank-shell.display-mode .topbar {
+          flex:0 0 auto;
+          min-height:42px;
+          margin-bottom:7px;
+          gap:9px;
+          flex-wrap:nowrap;
+        }
+        .rank-shell.display-mode .topbar h1 {
+          font-size:clamp(18px,1.35vw,25px)!important;
+          white-space:nowrap;
+        }
+        .rank-shell.display-mode .brand-logo {
+          width:42px;
+          height:42px;
+          border-radius:11px;
+        }
+
+        .rank-shell.display-mode .rank-grid {
+          flex:1 1 auto;
+          min-height:0;
+          width:100%;
+          display:grid;
+          gap:7px;
+          align-items:stretch;
+          align-content:stretch;
+          transition:opacity .42s ease, filter .42s ease;
+        }
+
+
+        .rank-shell.theme-sydney.display-mode .rank-grid {
+          grid-template-columns:repeat(7,minmax(0,1fr));
+          grid-template-rows:repeat(2,minmax(0,1fr));
+        }
+        .rank-shell.theme-sydney.display-mode .rank-row {
+          min-height:19px;
+          padding:1.5px 4px;
+          gap:5px;
+          font-size:clamp(8px,.56vw,10.5px);
+        }
+        .rank-shell.theme-sydney.display-mode .rank-num {
+          width:19px;
+          height:19px;
+          flex-basis:19px;
+          border-radius:6px;
+          font-size:9px;
+        }
+        
+
+        .rank-shell.display-mode .rank-card {
+          min-width:0;
+          min-height:0;
+          height:100%;
+          display:flex;
+          flex-direction:column;
+          overflow:hidden;
+          border-radius:11px;
+          animation:none!important;
+          transition:opacity .4s ease, filter .4s ease, box-shadow .3s ease, border-color .3s ease;
+        }
         .rank-shell.display-mode .rank-card:hover { transform:none; }
-        .rank-shell.display-mode .rank-row { padding:7px 10px; gap:9px; cursor:default; }
+
+        .rank-shell.display-mode .rank-card-header {
+          flex:0 0 auto;
+          padding:5px 7px!important;
+        }
+        .rank-shell.display-mode .rank-card-title {
+          font-size:clamp(9px,.72vw,13px)!important;
+          line-height:1.05;
+          white-space:nowrap;
+        }
+        .rank-shell.display-mode .rank-card-body {
+          flex:1 1 auto;
+          min-height:0;
+          overflow:hidden;
+          padding:3px 5px!important;
+        }
+
+        .rank-shell.display-mode .rank-row {
+          cursor:default;
+          line-height:1;
+          border-radius:7px;
+        }
+        .rank-shell.display-mode .rank-row + .rank-row { margin-top:1px; }
         .rank-shell.display-mode .rank-row:hover { transform:none; background:inherit; }
-        .rank-shell.display-mode .rank-num { width:29px; height:29px; flex-basis:29px; border-radius:9px; }
-        .rank-shell.display-mode .champion-summary,
+
         .rank-shell.display-mode .rank-last-activity,
         .rank-shell.display-mode .rank-base,
         .rank-shell.display-mode .rank-chevron { display:none!important; }
+
+        /* Keep champion identity/photo visible in the compact overview. */
+        .rank-shell.display-mode .champion-summary {
+          display:flex!important;
+          pointer-events:none;
+          gap:4px!important;
+          align-items:center!important;
+        }
+        .rank-shell.display-mode .champion-summary > div:first-child {
+          display:none;
+        }
+        .rank-shell.display-mode .champ-photo {
+          width:28px;
+          height:28px;
+          border-width:1px;
+          box-shadow:0 0 0 2px rgba(245,197,66,.08),0 4px 12px rgba(0,0,0,.25);
+        }
+
         .rank-shell.display-mode .display-mode-toggle {
           position:fixed;
-          right:12px;
-          bottom:10px;
-          z-index:85;
+          right:10px;
+          bottom:8px;
+          z-index:135;
           margin:0;
-          opacity:.28;
-          background:rgba(5,9,20,.76);
+          padding:5px 8px;
+          opacity:.22;
+          background:rgba(5,9,20,.78);
           backdrop-filter:blur(10px);
           transition:opacity .18s ease;
         }
         .rank-shell.display-mode .display-mode-toggle:hover { opacity:1; }
 
-        @media (min-width:1200px) {
-          .rank-shell.display-mode .rank-grid {
-            grid-template-columns:repeat(4,minmax(250px,1fr));
-            gap:12px;
-          }
+        /* Stage 1: result card appears while the whole board darkens. */
+        .rank-shell.display-mode.presentation-announcement .rank-grid {
+          opacity:.16;
+          filter:brightness(.42) saturate(.7) blur(.6px);
+        }
+
+        /* Stage 2/4: hide the grid while switching layouts, avoiding any
+           distracting card teleport/reflow on screen. */
+        .rank-shell.display-mode.presentation-focus-prep .rank-grid,
+        .rank-shell.display-mode.presentation-return-prep .rank-grid {
+          opacity:0;
+          filter:brightness(.35);
+        }
+
+        /* During prep/focus keep ONLY affected ladders mounted in the visible grid. */
+        .rank-shell.display-mode.presentation-focus-prep .rank-card:not(.focus-target),
+        .rank-shell.display-mode.presentation-focus .rank-card:not(.focus-target),
+        .rank-shell.display-mode.presentation-return-prep .rank-card:not(.focus-target) {
+          display:none!important;
+        }
+
+        .rank-shell.display-mode.presentation-focus-prep .rank-grid,
+        .rank-shell.display-mode.presentation-focus .rank-grid,
+        .rank-shell.display-mode.presentation-return-prep .rank-grid {
+          grid-template-columns:repeat(var(--display-focus-cols),minmax(0,1fr))!important;
+          grid-template-rows:minmax(0,1fr)!important;
+          gap:clamp(12px,1.5vw,22px);
+          padding:clamp(18px,2.5vh,34px) clamp(24px,3vw,58px);
+          align-items:center;
+          align-content:center;
+        }
+
+        .rank-shell.display-mode.presentation-focus .rank-grid {
+          opacity:1;
+          filter:none;
+        }
+
+        .rank-shell.display-mode.presentation-focus .rank-card.focus-target {
+          height:min(78vh,760px);
+          max-height:calc(100dvh - 88px);
+          border-radius:18px;
+          border-color:rgba(255,255,255,.20)!important;
+          box-shadow:0 28px 90px rgba(0,0,0,.48)!important;
+        }
+        .rank-shell.display-mode.presentation-focus .rank-card-header {
+          padding:10px 12px!important;
+        }
+        .rank-shell.display-mode.presentation-focus .rank-card-title {
+          font-size:clamp(16px,1.35vw,23px)!important;
+        }
+        .rank-shell.display-mode.presentation-focus .rank-card-body {
+          padding:8px!important;
+        }
+        .rank-shell.display-mode.presentation-focus .rank-row {
+          min-height:0;
+          padding:7px 10px!important;
+          gap:10px!important;
+          border-radius:11px;
+          font-size:clamp(12px,1vw,17px)!important;
+          line-height:1.1;
+        }
+        .rank-shell.display-mode.presentation-focus .rank-row + .rank-row {
+          margin-top:2px;
+        }
+        .rank-shell.display-mode.presentation-focus .rank-num {
+          width:31px!important;
+          height:31px!important;
+          flex-basis:31px!important;
+          border-radius:9px!important;
+          font-size:13px!important;
+        }
+        .rank-shell.display-mode.presentation-focus .champion-summary > div:first-child {
+          display:block;
+        }
+        .rank-shell.display-mode.presentation-focus .champ-photo {
+          width:48px;
+          height:48px;
+          border-width:2px;
         }
 
         /* Live result announcement: shown before Display Mode rank movement. */
@@ -2729,7 +2975,10 @@ export default function App() {
         />
       )}
 
-      <div className={`rank-shell theme-sydney ${displayMode ? "display-mode" : ""}`}>
+      <div
+        className={`rank-shell theme-sydney ${displayMode ? "display-mode" : ""} ${displayMode ? `presentation-${displayPresentationStage}` : ""}`}
+        style={{ "--display-focus-cols": displayFocusCols }}
+      >
         <div className="topbar">
           {CONFIG.branding.logoUrl && (
             <img src={CONFIG.branding.logoUrl} alt="logo" className="brand-logo" />
@@ -2951,13 +3200,13 @@ export default function App() {
             return (
               <section
                 key={wc}
-                className="rank-card"
+                className={`rank-card ${displayFocusActive && displayFocusClasses.includes(wc) ? "focus-target" : ""}`}
                 style={{ ...cardStyle, animationDelay: `${Math.min(cardIndex * 35, 280)}ms` }}
               >
-                <div style={{ padding: "13px 14px", borderBottom: "1px solid rgba(255,255,255,.09)" }}>
+                <div className="rank-card-header" style={{ padding: "13px 14px", borderBottom: "1px solid rgba(255,255,255,.09)" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ fontSize: 17, fontWeight: 900, letterSpacing: -0.2 }}>{prettyClassLabel(wc)}</div>
+                      <div className="rank-card-title" style={{ fontSize: 17, fontWeight: 900, letterSpacing: -0.2 }}>{prettyClassLabel(wc)}</div>
                       <div className="rank-last-activity" style={{ fontSize: 10.5, opacity: 0.5, marginTop: 3 }}>
                         {lastActivity ? `Last activity ${formatDateAU(lastActivity)}` : "No recorded activity"}
                       </div>
@@ -2984,7 +3233,7 @@ export default function App() {
                   </div>
                 </div>
 
-                <div style={{ padding: 8 }}>
+                <div className="rank-card-body" style={{ padding: 8 }}>
                   {filtered.length === 0 ? (
                     <div style={{ padding: "18px 12px", opacity: 0.55, textAlign: "center", fontSize: 13 }}>
                       No matching competitor in this class.
@@ -2998,6 +3247,7 @@ export default function App() {
                       limit={15}
                       liveEvents={releasedLiveEvents.filter((event) => event.wc === wc)}
                       holdLiveUpdate={displayLivePending}
+                      layoutEpoch={displayPresentationStage}
                       onSelect={setSelectedPlayerId}
                       getRowClass={(p) => {
                         const key = `${wc}:${p.id}`;
