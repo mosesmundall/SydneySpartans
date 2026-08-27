@@ -1,134 +1,161 @@
 import crypto from "node:crypto";
 
-const CLUBS = {
-  sydney: {
-    name: "Sydney Spartans",
-    matches: {
-      id: "1DGCu6nW9TNH-id5Xfsc4TkerwvJ1vh09uZrKmUfNMlU",
-      gid: "573157689",
-    },
-    competitors: {
-      id: "15DuCXPZXtIG97V5pCod2kLkW4iqkb3kOBwoo7znwDDU",
-      gid: "1561293575",
-    },
-    dateMode: "AU_DMY",
-    allowedWeights: [
-      "women", "woman", "u60kg", "youth",
-      "u70kg", "u80kg", "u90kg", "u100kg", "100kg+",
-    ],
-  },
+/*
+ * Netlify Function: secure Match-sheet writer.
+ *
+ * Secrets required in Netlify Environment Variables (Functions scope):
+ *   GOOGLE_SERVICE_ACCOUNT_EMAIL
+ *   GOOGLE_PRIVATE_KEY_B64
+ *   MATCH_ENTRY_TOKEN
+ */
 
-  nuac: {
-    name: "NUAC Armwrestling Club",
-    matches: {
-      id: "16NFals1k03ibhtokiG9HzRe207mpKovxjLRNscDq1KI",
-      gid: "573157689",
-    },
-    competitors: {
-      id: "1oKakYJ_L4kpgw2FrPgRxaZHqa5BKgYXP5drXJ5bAuHw",
-      gid: "1561293575",
-    },
-    dateMode: "NUAC_MIGRATION",
-    allowedWeights: [
-      "women", "woman", "u60kg", "u75kg", "u85kg", "open",
-    ],
+const CLUB = {
+  name: "Sydney Spartans",
+  matches: {
+    id: "1DGCu6nW9TNH-id5Xfsc4TkerwvJ1vh09uZrKmUfNMlU",
+    gid: "573157689",
   },
+  competitors: {
+    id: "15DuCXPZXtIG97V5pCod2kLkW4iqkb3kOBwoo7znwDDU",
+    gid: "1561293575",
+  },
+  dateMode: "AU_DMY",
+  allowedWeights: [
+    "women",
+    "woman",
+    "u60kg",
+    "youth",
+    "u70kg",
+    "u80kg",
+    "u90kg",
+    "u100kg",
+    "100kg+",
+  ],
 };
 
-function clubFromEnvironment() {
-  const email = String(
-    process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || ""
-  )
-    .trim()
-    .toLowerCase();
+const SHEETS_SCOPE =
+  "https://www.googleapis.com/auth/spreadsheets";
 
-  if (email.startsWith("spartans-rank-writer@")) {
-    return CLUBS.sydney;
-  }
+const GOOGLE_TOKEN_URL =
+  "https://oauth2.googleapis.com/token";
 
-  if (email.startsWith("nuac-rank-writer@")) {
-    return CLUBS.nuac;
-  }
+const SYDNEY_TZ =
+  "Australia/Sydney";
 
-  throw new Error(
-    "GOOGLE_SERVICE_ACCOUNT_EMAIL does not match the configured Sydney or NUAC service account."
+let cachedGoogleToken = null;
+let cachedGoogleTokenExpiresAt = 0;
+
+function reply(status, body) {
+  return new Response(
+    JSON.stringify(body),
+    {
+      status,
+      headers: {
+        "content-type":
+          "application/json; charset=utf-8",
+        "cache-control":
+          "no-store",
+      },
+    }
   );
 }
 
-const CLUB = clubFromEnvironment();
-
-const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const SHEETS_SCOPE =
-  "https://www.googleapis.com/auth/spreadsheets";
-const SYDNEY_TZ = "Australia/Sydney";
-
-let cachedToken = null;
-let cachedTokenExpiresAt = 0;
-
-function reply(status, body) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-    },
-  });
+function trim(value) {
+  return String(
+    value ?? ""
+  ).trim();
 }
 
-const trim = (v) => String(v ?? "").trim();
-
-const normKey = (v) =>
-  trim(v)
+function normKey(value) {
+  return trim(value)
     .toLowerCase()
-    .replace(/[^a-z0-9]/g, "");
+    .replace(
+      /[^a-z0-9]/g,
+      ""
+    );
+}
 
-const b64url = (v) =>
-  Buffer.from(v).toString("base64url");
+function b64url(input) {
+  return Buffer.from(
+    input
+  ).toString(
+    "base64url"
+  );
+}
 
-function tokensMatch(received, expected) {
-  const a = Buffer.from(String(received || ""));
-  const b = Buffer.from(String(expected || ""));
+function tokensMatch(
+  received,
+  expected
+) {
+  const a = Buffer.from(
+    String(
+      received || ""
+    )
+  );
+
+  const b = Buffer.from(
+    String(
+      expected || ""
+    )
+  );
 
   return (
     a.length > 0 &&
     a.length === b.length &&
-    crypto.timingSafeEqual(a, b)
+    crypto.timingSafeEqual(
+      a,
+      b
+    )
   );
 }
 
 function requireSecrets() {
   const email = trim(
-    process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL
+    process.env
+      .GOOGLE_SERVICE_ACCOUNT_EMAIL
   );
 
   const keyB64 = trim(
-    process.env.GOOGLE_PRIVATE_KEY_B64
+    process.env
+      .GOOGLE_PRIVATE_KEY_B64
   );
 
   const entryToken = trim(
-    process.env.MATCH_ENTRY_TOKEN
+    process.env
+      .MATCH_ENTRY_TOKEN
   );
 
-  if (!email || !keyB64 || !entryToken) {
+  if (
+    !email ||
+    !keyB64 ||
+    !entryToken
+  ) {
     throw new Error(
       "Match-entry backend is missing one or more required Netlify environment variables."
     );
   }
 
-  let privateKey = "";
+  let privateKey;
 
   try {
-    privateKey = Buffer.from(
-      keyB64,
-      "base64"
-    ).toString("utf8");
+    privateKey =
+      Buffer.from(
+        keyB64,
+        "base64"
+      ).toString(
+        "utf8"
+      );
   } catch {
     throw new Error(
       "GOOGLE_PRIVATE_KEY_B64 could not be decoded."
     );
   }
 
-  if (!privateKey.includes("BEGIN PRIVATE KEY")) {
+  if (
+    !privateKey.includes(
+      "BEGIN PRIVATE KEY"
+    )
+  ) {
     throw new Error(
       "GOOGLE_PRIVATE_KEY_B64 does not contain a valid service-account private key."
     );
@@ -145,13 +172,17 @@ async function getGoogleAccessToken(
   email,
   privateKey
 ) {
-  const now = Math.floor(Date.now() / 1000);
+  const now =
+    Math.floor(
+      Date.now() / 1000
+    );
 
   if (
-    cachedToken &&
-    cachedTokenExpiresAt > now + 60
+    cachedGoogleToken &&
+    cachedGoogleTokenExpiresAt >
+      now + 60
   ) {
-    return cachedToken;
+    return cachedGoogleToken;
   }
 
   const header = b64url(
@@ -164,8 +195,10 @@ async function getGoogleAccessToken(
   const claims = b64url(
     JSON.stringify({
       iss: email,
-      scope: SHEETS_SCOPE,
-      aud: GOOGLE_TOKEN_URL,
+      scope:
+        SHEETS_SCOPE,
+      aud:
+        GOOGLE_TOKEN_URL,
       iat: now,
       exp: now + 3600,
     })
@@ -174,53 +207,70 @@ async function getGoogleAccessToken(
   const unsigned =
     `${header}.${claims}`;
 
-  const signature = crypto
-    .sign(
-      "RSA-SHA256",
-      Buffer.from(unsigned),
-      privateKey
-    )
-    .toString("base64url");
+  const signature =
+    crypto
+      .sign(
+        "RSA-SHA256",
+        Buffer.from(
+          unsigned
+        ),
+        privateKey
+      )
+      .toString(
+        "base64url"
+      );
 
-  const response = await fetch(
-    GOOGLE_TOKEN_URL,
-    {
-      method: "POST",
-      headers: {
-        "content-type":
-          "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        grant_type:
-          "urn:ietf:params:oauth:grant-type:jwt-bearer",
-        assertion:
-          `${unsigned}.${signature}`,
-      }),
-    }
-  );
+  const assertion =
+    `${unsigned}.${signature}`;
 
-  const data = await response
-    .json()
-    .catch(() => ({}));
+  const tokenResponse =
+    await fetch(
+      GOOGLE_TOKEN_URL,
+      {
+        method:
+          "POST",
+        headers: {
+          "content-type":
+            "application/x-www-form-urlencoded",
+        },
+        body:
+          new URLSearchParams(
+            {
+              grant_type:
+                "urn:ietf:params:oauth:grant-type:jwt-bearer",
+              assertion,
+            }
+          ),
+      }
+    );
+
+  const payload =
+    await tokenResponse
+      .json()
+      .catch(
+        () => ({})
+      );
 
   if (
-    !response.ok ||
-    !data.access_token
+    !tokenResponse.ok ||
+    !payload.access_token
   ) {
     throw new Error(
-      `Google authentication failed (${response.status}). Check the service-account email/private key.`
+      `Google authentication failed (${tokenResponse.status}). Check the service-account email/private key.`
     );
   }
 
-  cachedToken =
-    data.access_token;
+  cachedGoogleToken =
+    payload.access_token;
 
-  cachedTokenExpiresAt =
-    now + Number(
-      data.expires_in || 3600
+  cachedGoogleTokenExpiresAt =
+    now +
+    Number(
+      payload.expires_in ||
+        3600
     );
 
-  return cachedToken;
+  return cachedGoogleToken;
 }
 
 async function googleJson(
@@ -228,36 +278,43 @@ async function googleJson(
   accessToken,
   options = {}
 ) {
-  const response = await fetch(
-    url,
-    {
-      ...options,
+  const response =
+    await fetch(
+      url,
+      {
+        ...options,
+        headers: {
+          authorization:
+            `Bearer ${accessToken}`,
+          ...(options.body
+            ? {
+                "content-type":
+                  "application/json",
+              }
+            : {}),
+          ...(options.headers ||
+            {}),
+        },
+      }
+    );
 
-      headers: {
-        authorization:
-          `Bearer ${accessToken}`,
-
-        ...(options.body
-          ? {
-              "content-type":
-                "application/json",
-            }
-          : {}),
-
-        ...(options.headers || {}),
-      },
-    }
-  );
-
-  const data = await response
-    .json()
-    .catch(() => ({}));
+  const data =
+    await response
+      .json()
+      .catch(
+        () => ({})
+      );
 
   if (!response.ok) {
-    const err = new Error(
-      data?.error?.message ||
-        `Google Sheets request failed (${response.status}).`
-    );
+    const message =
+      data?.error
+        ?.message ||
+      `Google Sheets request failed (${response.status}).`;
+
+    const err =
+      new Error(
+        message
+      );
 
     err.status =
       response.status;
@@ -268,8 +325,12 @@ async function googleJson(
   return data;
 }
 
-function quoteSheetTitle(title) {
-  return `'${String(title).replace(
+function quoteSheetTitle(
+  title
+) {
+  return `'${String(
+    title
+  ).replace(
     /'/g,
     "''"
   )}'`;
@@ -280,11 +341,12 @@ async function resolveSheetTitle(
   gid,
   accessToken
 ) {
-  const url = new URL(
-    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
-      spreadsheetId
-    )}`
-  );
+  const url =
+    new URL(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+        spreadsheetId
+      )}`
+    );
 
   url.searchParams.set(
     "fields",
@@ -297,24 +359,32 @@ async function resolveSheetTitle(
       accessToken
     );
 
-  const sheet = (
-    data.sheets || []
-  ).find(
-    (s) =>
-      String(
-        s?.properties?.sheetId
-      ) === String(gid)
-  );
+  const target =
+    (
+      data.sheets ||
+      []
+    ).find(
+      (s) =>
+        String(
+          s?.properties
+            ?.sheetId
+        ) ===
+        String(gid)
+    );
 
   if (
-    !sheet?.properties?.title
+    !target
+      ?.properties
+      ?.title
   ) {
     throw new Error(
       `Could not find sheet tab gid ${gid} inside spreadsheet ${spreadsheetId}.`
     );
   }
 
-  return sheet.properties.title;
+  return target
+    .properties
+    .title;
 }
 
 async function getValues(
@@ -322,13 +392,14 @@ async function getValues(
   range,
   accessToken
 ) {
-  const url = new URL(
-    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
-      spreadsheetId
-    )}/values/${encodeURIComponent(
-      range
-    )}`
-  );
+  const url =
+    new URL(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+        spreadsheetId
+      )}/values/${encodeURIComponent(
+        range
+      )}`
+    );
 
   url.searchParams.set(
     "majorDimension",
@@ -346,51 +417,9 @@ async function getValues(
       accessToken
     );
 
-  return data.values || [];
-}
-
-async function appendValues(
-  spreadsheetId,
-  range,
-  row,
-  accessToken
-) {
-  const url = new URL(
-    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
-      spreadsheetId
-    )}/values/${encodeURIComponent(
-      range
-    )}:append`
-  );
-
-  url.searchParams.set(
-    "valueInputOption",
-    "RAW"
-  );
-
-  url.searchParams.set(
-    "insertDataOption",
-    "INSERT_ROWS"
-  );
-
-  url.searchParams.set(
-    "includeValuesInResponse",
-    "true"
-  );
-
-  return googleJson(
-    url.toString(),
-    accessToken,
-    {
-      method: "POST",
-
-      body: JSON.stringify({
-        majorDimension:
-          "ROWS",
-
-        values: [row],
-      }),
-    }
+  return (
+    data.values ||
+    []
   );
 }
 
@@ -398,13 +427,18 @@ function headerIndex(
   headers,
   aliases
 ) {
-  const wanted = new Set(
-    aliases.map(normKey)
-  );
+  const wanted =
+    new Set(
+      aliases.map(
+        normKey
+      )
+    );
 
   return headers.findIndex(
     (h) =>
-      wanted.has(normKey(h))
+      wanted.has(
+        normKey(h)
+      )
   );
 }
 
@@ -412,242 +446,29 @@ function columnLetter(
   indexZeroBased
 ) {
   let n =
-    indexZeroBased + 1;
+    indexZeroBased +
+    1;
 
-  let out = "";
+  let out =
+    "";
 
   while (n > 0) {
     n -= 1;
 
     out =
       String.fromCharCode(
-        65 + (n % 26)
-      ) + out;
+        65 +
+          (n % 26)
+      ) +
+      out;
 
-    n = Math.floor(
-      n / 26
-    );
+    n =
+      Math.floor(
+        n / 26
+      );
   }
 
   return out;
-}
-
-function buildHeaderMap(
-  headers,
-  kind
-) {
-  if (
-    kind === "matches"
-  ) {
-    const map = {
-      date: headerIndex(
-        headers,
-        ["DATE"]
-      ),
-
-      winner: headerIndex(
-        headers,
-        [
-          "Winner ID",
-          "winner_id",
-        ]
-      ),
-
-      loser: headerIndex(
-        headers,
-        [
-          "Loser ID",
-          "Looser ID",
-          "loser_id",
-          "looser_id",
-        ]
-      ),
-
-      arm: headerIndex(
-        headers,
-        [
-          "Arm?",
-          "Arm",
-        ]
-      ),
-
-      badge: headerIndex(
-        headers,
-        [
-          "Badge?",
-          "Badge",
-        ]
-      ),
-    };
-
-    const required = [
-      "date",
-      "winner",
-      "loser",
-      "arm",
-      "badge",
-    ];
-
-    const missing =
-      required.filter(
-        (key) =>
-          map[key] < 0
-      );
-
-    if (
-      missing.length
-    ) {
-      throw new Error(
-        `Match sheet is missing required header(s): ${missing.join(
-          ", "
-        )}.`
-      );
-    }
-
-    return map;
-  }
-
-  const map = {
-    id: headerIndex(
-      headers,
-      [
-        "ID",
-        "Player ID",
-        "Competitor ID",
-      ]
-    ),
-
-    name: headerIndex(
-      headers,
-      [
-        "Name",
-        "Display Name",
-      ]
-    ),
-
-    weight: headerIndex(
-      headers,
-      [
-        "Weight Class",
-        "weight_class",
-      ]
-    ),
-  };
-
-  if (map.id < 0) {
-    throw new Error(
-      "Competitor sheet is missing an ID / Player ID / Competitor ID header."
-    );
-  }
-
-  if (map.name < 0) {
-    throw new Error(
-      "Competitor sheet is missing a Name header."
-    );
-  }
-
-  if (map.weight < 0) {
-    throw new Error(
-      "Competitor sheet is missing a Weight Class header."
-    );
-  }
-
-  return map;
-}
-
-const rowValue = (
-  row,
-  index
-) =>
-  index >= 0
-    ? trim(row[index])
-    : "";
-
-function competitorRecords(
-  rows,
-  map
-) {
-  return rows
-    .map(
-      (
-        row,
-        i
-      ) => ({
-        row: i + 2,
-
-        id: rowValue(
-          row,
-          map.id
-        ),
-
-        name: rowValue(
-          row,
-          map.name
-        ),
-
-        weight:
-          rowValue(
-            row,
-            map.weight
-          ),
-      })
-    )
-
-    .filter(
-      (p) =>
-        p.id ||
-        p.name ||
-        p.weight
-    );
-}
-
-function validateSelectedCompetitor(
-  id,
-  records,
-  label
-) {
-  const found =
-    records.filter(
-      (p) =>
-        p.id === id
-    );
-
-  if (
-    found.length === 0
-  ) {
-    return `${label} ID '${id}' was not found in the Competitor sheet.`;
-  }
-
-  if (
-    found.length > 1
-  ) {
-    return `${label} ID '${id}' appears more than once in the Competitor sheet. Fix the duplicate ID first.`;
-  }
-
-  const person =
-    found[0];
-
-  if (
-    !person.name
-  ) {
-    return `${label} '${id}' has a blank competitor name. Fix Competitor sheet row ${person.row} first.`;
-  }
-
-  if (
-    !person.weight
-  ) {
-    return `${label} '${id}' has no weight class. Fix Competitor sheet row ${person.row} first.`;
-  }
-
-  if (
-    !CLUB.allowedWeights.includes(
-      person.weight.toLowerCase()
-    )
-  ) {
-    return `${label} '${id}' has invalid weight class '${person.weight}'. Fix Competitor sheet row ${person.row} first.`;
-  }
-
-  return "";
 }
 
 function validIsoDate(
@@ -666,7 +487,7 @@ function validIsoDate(
   const mo = +m[2];
   const d = +m[3];
 
-  const dt =
+  const date =
     new Date(
       Date.UTC(
         y,
@@ -676,11 +497,11 @@ function validIsoDate(
     );
 
   return (
-    dt.getUTCFullYear() ===
+    date.getUTCFullYear() ===
       y &&
-    dt.getUTCMonth() ===
+    date.getUTCMonth() ===
       mo - 1 &&
-    dt.getUTCDate() ===
+    date.getUTCDate() ===
       d
   );
 }
@@ -692,13 +513,10 @@ function sydneyTodayIso() {
       {
         timeZone:
           SYDNEY_TZ,
-
         year:
           "numeric",
-
         month:
           "2-digit",
-
         day:
           "2-digit",
       }
@@ -733,15 +551,6 @@ function sheetDateFromIso(
   ] =
     iso.split("-");
 
-  if (
-    CLUB.dateMode ===
-      "NUAC_MIGRATION" &&
-    iso <
-      "2026-08-01"
-  ) {
-    return `${mo}/${d}/${y}`;
-  }
-
   return `${d}/${mo}/${y}`;
 }
 
@@ -751,7 +560,9 @@ function candidateIso(
   d
 ) {
   const iso =
-    `${String(y).padStart(
+    `${String(
+      y
+    ).padStart(
       4,
       "0"
     )}-${String(
@@ -798,9 +609,14 @@ function storedDateToIso(
     return null;
   }
 
-  const a = +m[1];
-  const b = +m[2];
-  const y = +m[3];
+  const a =
+    +m[1];
+
+  const b =
+    +m[2];
+
+  const y =
+    +m[3];
 
   const dmy =
     candidateIso(
@@ -809,70 +625,7 @@ function storedDateToIso(
       a
     );
 
-  const mdy =
-    candidateIso(
-      y,
-      a,
-      b
-    );
-
-  if (
-    CLUB.dateMode !==
-    "NUAC_MIGRATION"
-  ) {
-    return dmy;
-  }
-
-  if (
-    dmy &&
-    !mdy
-  ) {
-    return dmy;
-  }
-
-  if (
-    mdy &&
-    !dmy
-  ) {
-    return mdy;
-  }
-
-  if (
-    !dmy &&
-    !mdy
-  ) {
-    return null;
-  }
-
-  if (
-    dmy === mdy
-  ) {
-    return dmy;
-  }
-
-  const cutover =
-    "2026-08-01";
-
-  const dmyPost =
-    dmy >=
-    cutover;
-
-  const mdyPost =
-    mdy >=
-    cutover;
-
-  if (
-    dmyPost !==
-    mdyPost
-  ) {
-    return dmyPost
-      ? dmy
-      : mdy;
-  }
-
-  return dmyPost
-    ? dmy
-    : mdy;
+  return dmy;
 }
 
 function normalizeArm(
@@ -899,6 +652,329 @@ function normalizeArm(
   return "";
 }
 
+function buildHeaderMap(
+  headers,
+  kind
+) {
+  if (
+    kind ===
+    "matches"
+  ) {
+    const out = {
+      date:
+        headerIndex(
+          headers,
+          ["DATE"]
+        ),
+
+      winner:
+        headerIndex(
+          headers,
+          [
+            "Winner ID",
+            "winner_id",
+          ]
+        ),
+
+      loser:
+        headerIndex(
+          headers,
+          [
+            "Loser ID",
+            "Looser ID",
+            "loser_id",
+            "looser_id",
+          ]
+        ),
+
+      arm:
+        headerIndex(
+          headers,
+          [
+            "Arm?",
+            "Arm",
+          ]
+        ),
+
+      badge:
+        headerIndex(
+          headers,
+          [
+            "Badge?",
+            "Badge",
+          ]
+        ),
+    };
+
+    const missing =
+      Object.entries(
+        out
+      )
+        .filter(
+          ([
+            key,
+            index,
+          ]) =>
+            [
+              "date",
+              "winner",
+              "loser",
+              "arm",
+            ].includes(
+              key
+            ) &&
+            index < 0
+        )
+        .map(
+          ([key]) =>
+            key
+        );
+
+    if (
+      missing.length
+    ) {
+      throw new Error(
+        `Match sheet is missing required header(s): ${missing.join(
+          ", "
+        )}.`
+      );
+    }
+
+    return out;
+  }
+
+  const out = {
+    id:
+      headerIndex(
+        headers,
+        [
+          "ID",
+          "Player ID",
+          "Competitor ID",
+        ]
+      ),
+
+    name:
+      headerIndex(
+        headers,
+        [
+          "Name",
+          "Display Name",
+        ]
+      ),
+
+    weight:
+      headerIndex(
+        headers,
+        [
+          "Weight Class",
+          "weight_class",
+        ]
+      ),
+
+    active:
+      headerIndex(
+        headers,
+        [
+          "Active",
+          "Currently Active?",
+          "Currently Active",
+        ]
+      ),
+  };
+
+  if (
+    out.id < 0
+  ) {
+    throw new Error(
+      "Competitor sheet is missing an ID / Player ID / Competitor ID header."
+    );
+  }
+
+  if (
+    out.name < 0
+  ) {
+    throw new Error(
+      "Competitor sheet is missing a Name header."
+    );
+  }
+
+  if (
+    out.weight < 0
+  ) {
+    throw new Error(
+      "Competitor sheet is missing a Weight Class header."
+    );
+  }
+
+  return out;
+}
+
+function rowValue(
+  row,
+  index
+) {
+  return index >= 0
+    ? trim(
+        row[index]
+      )
+    : "";
+}
+
+function competitorRecords(
+  rows,
+  map
+) {
+  return rows
+    .map(
+      (
+        row,
+        index
+      ) => ({
+        row:
+          index + 2,
+
+        id:
+          rowValue(
+            row,
+            map.id
+          ),
+
+        name:
+          rowValue(
+            row,
+            map.name
+          ),
+
+        weight:
+          rowValue(
+            row,
+            map.weight
+          ),
+
+        active:
+          rowValue(
+            row,
+            map.active
+          ),
+      })
+    )
+    .filter(
+      (r) =>
+        r.id ||
+        r.name ||
+        r.weight ||
+        r.active
+    );
+}
+
+function validateSelectedCompetitor(
+  id,
+  records,
+  label
+) {
+  const matches =
+    records.filter(
+      (r) =>
+        r.id === id
+    );
+
+  if (
+    matches.length ===
+    0
+  ) {
+    return `${label} ID '${id}' was not found in the Competitor sheet.`;
+  }
+
+  if (
+    matches.length >
+    1
+  ) {
+    return `${label} ID '${id}' appears more than once in the Competitor sheet. Fix the duplicate ID first.`;
+  }
+
+  const person =
+    matches[0];
+
+  if (
+    !person.name
+  ) {
+    return `${label} '${id}' has a blank competitor name. Fix Competitor sheet row ${person.row} first.`;
+  }
+
+  if (
+    !person.weight
+  ) {
+    return `${label} '${id}' has no weight class. Fix Competitor sheet row ${person.row} first.`;
+  }
+
+  if (
+    !CLUB.allowedWeights.includes(
+      person.weight
+        .toLowerCase()
+    )
+  ) {
+    return `${label} '${id}' has invalid weight class '${person.weight}'. Fix Competitor sheet row ${person.row} first.`;
+  }
+
+  return "";
+}
+
+async function appendValues(
+  spreadsheetId,
+  range,
+  values,
+  accessToken
+) {
+  const url =
+    new URL(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+        spreadsheetId
+      )}/values/${encodeURIComponent(
+        range
+      )}:append`
+    );
+
+  // Critical fix:
+  // Store dates as real Google Sheets dates,
+  // not text with a leading apostrophe.
+  url.searchParams.set(
+    "valueInputOption",
+    "USER_ENTERED"
+  );
+
+  url.searchParams.set(
+    "insertDataOption",
+    "INSERT_ROWS"
+  );
+
+  url.searchParams.set(
+    "includeValuesInResponse",
+    "true"
+  );
+
+  return googleJson(
+    url.toString(),
+    accessToken,
+    {
+      method:
+        "POST",
+
+      body:
+        JSON.stringify(
+          {
+            majorDimension:
+              "ROWS",
+
+            values: [
+              values,
+            ],
+          }
+        ),
+    }
+  );
+}
+
 function updatedRowNumber(
   updatedRange
 ) {
@@ -911,7 +987,9 @@ function updatedRowNumber(
     );
 
   return m
-    ? Number(m[1])
+    ? Number(
+        m[1]
+      )
     : null;
 }
 
@@ -969,7 +1047,6 @@ export default async (
         401,
         {
           ok: false,
-
           error:
             "Invalid or expired match-entry link.",
         }
@@ -986,41 +1063,45 @@ export default async (
       matchTitle,
       competitorTitle,
     ] =
-      await Promise.all([
-        resolveSheetTitle(
-          CLUB.matches.id,
-          CLUB.matches.gid,
-          accessToken
-        ),
+      await Promise.all(
+        [
+          resolveSheetTitle(
+            CLUB.matches.id,
+            CLUB.matches.gid,
+            accessToken
+          ),
 
-        resolveSheetTitle(
-          CLUB.competitors.id,
-          CLUB.competitors.gid,
-          accessToken
-        ),
-      ]);
+          resolveSheetTitle(
+            CLUB.competitors.id,
+            CLUB.competitors.gid,
+            accessToken
+          ),
+        ]
+      );
 
     const [
       matchHeaderRows,
       competitorHeaderRows,
     ] =
-      await Promise.all([
-        getValues(
-          CLUB.matches.id,
-          `${quoteSheetTitle(
-            matchTitle
-          )}!1:1`,
-          accessToken
-        ),
+      await Promise.all(
+        [
+          getValues(
+            CLUB.matches.id,
+            `${quoteSheetTitle(
+              matchTitle
+            )}!1:1`,
+            accessToken
+          ),
 
-        getValues(
-          CLUB.competitors.id,
-          `${quoteSheetTitle(
-            competitorTitle
-          )}!1:1`,
-          accessToken
-        ),
-      ]);
+          getValues(
+            CLUB.competitors.id,
+            `${quoteSheetTitle(
+              competitorTitle
+            )}!1:1`,
+            accessToken
+          ),
+        ]
+      );
 
     const matchHeaders =
       matchHeaderRows[0] ||
@@ -1073,22 +1154,17 @@ export default async (
         200,
         {
           ok: true,
-
           club:
             CLUB.name,
-
           matchSheet:
             matchTitle,
-
           competitorSheet:
             competitorTitle,
-
           competitorCount:
             competitors.filter(
               (p) =>
                 p.id
             ).length,
-
           headers:
             matchHeaders,
         }
@@ -1153,7 +1229,6 @@ export default async (
         422,
         {
           ok: false,
-
           error:
             "Choose both a winner and a loser from the competitor suggestions.",
         }
@@ -1168,7 +1243,6 @@ export default async (
         422,
         {
           ok: false,
-
           error:
             "Winner and loser cannot be the same competitor.",
         }
@@ -1180,7 +1254,6 @@ export default async (
         422,
         {
           ok: false,
-
           error:
             "Choose RIGHT or LEFT arm.",
         }
@@ -1196,7 +1269,6 @@ export default async (
         422,
         {
           ok: false,
-
           error:
             "Choose a valid match date.",
         }
@@ -1211,7 +1283,6 @@ export default async (
         422,
         {
           ok: false,
-
           error:
             "Future-dated matches cannot be submitted.",
         }
@@ -1232,7 +1303,6 @@ export default async (
         422,
         {
           ok: false,
-
           error:
             winnerProblem,
         }
@@ -1253,7 +1323,6 @@ export default async (
         422,
         {
           ok: false,
-
           error:
             loserProblem,
         }
@@ -1265,13 +1334,34 @@ export default async (
         dateIso
       );
 
+    const coreIndexes = [
+      matchMap.date,
+      matchMap.winner,
+      matchMap.loser,
+      matchMap.arm,
+    ];
+
+    if (
+      matchMap.badge <
+      0
+    ) {
+      return reply(
+        500,
+        {
+          ok: false,
+          error:
+            'Match sheet is missing the required Badge? column. Add a column headed exactly "Badge?" before using Match Entry.',
+        }
+      );
+    }
+
+    coreIndexes.push(
+      matchMap.badge
+    );
+
     const lastWriteIndex =
       Math.max(
-        matchMap.date,
-        matchMap.winner,
-        matchMap.loser,
-        matchMap.arm,
-        matchMap.badge
+        ...coreIndexes
       );
 
     const lastWriteCol =
@@ -1282,43 +1372,45 @@ export default async (
     const existingRows =
       await getValues(
         CLUB.matches.id,
-
         `${quoteSheetTitle(
           matchTitle
         )}!A2:${lastWriteCol}`,
-
         accessToken
       );
 
     const duplicateIndex =
       existingRows.findIndex(
-        (row) =>
-          storedDateToIso(
+        (row) => {
+          const existingDateIso =
+            storedDateToIso(
+              rowValue(
+                row,
+                matchMap.date
+              )
+            );
+
+          return (
+            existingDateIso ===
+              dateIso &&
             rowValue(
               row,
-              matchMap.date
-            )
-          ) ===
-            dateIso &&
-
-          rowValue(
-            row,
-            matchMap.winner
-          ) ===
-            winnerId &&
-
-          rowValue(
-            row,
-            matchMap.loser
-          ) ===
-            loserId &&
-
-          normalizeArm(
+              matchMap.winner
+            ) ===
+              winnerId &&
             rowValue(
               row,
-              matchMap.arm
-            )
-          ) === arm
+              matchMap.loser
+            ) ===
+              loserId &&
+            normalizeArm(
+              rowValue(
+                row,
+                matchMap.arm
+              )
+            ) ===
+              arm
+          );
+        }
       );
 
     if (
@@ -1330,14 +1422,11 @@ export default async (
         409,
         {
           ok: false,
-
           duplicate:
             true,
-
           row:
             duplicateIndex +
             2,
-
           error:
             `An identical date / winner / loser / arm match already exists on row ${
               duplicateIndex +
@@ -1355,19 +1444,23 @@ export default async (
 
     row[
       matchMap.date
-    ] = sheetDate;
+    ] =
+      sheetDate;
 
     row[
       matchMap.winner
-    ] = winnerId;
+    ] =
+      winnerId;
 
     row[
       matchMap.loser
-    ] = loserId;
+    ] =
+      loserId;
 
     row[
       matchMap.arm
-    ] = arm;
+    ] =
+      arm;
 
     row[
       matchMap.badge
@@ -1401,33 +1494,23 @@ export default async (
 
     const editUrl =
       writtenRow
-
         ? `https://docs.google.com/spreadsheets/d/${CLUB.matches.id}/edit?gid=${CLUB.matches.gid}&range=A${writtenRow}:${lastWriteCol}${writtenRow}#gid=${CLUB.matches.gid}`
-
         : `https://docs.google.com/spreadsheets/d/${CLUB.matches.id}/edit?gid=${CLUB.matches.gid}#gid=${CLUB.matches.gid}`;
 
     return reply(
       200,
       {
         ok: true,
-
         row:
           writtenRow,
-
         updatedRange:
           writtenRange,
-
         editUrl,
-
         dateWritten:
           sheetDate,
-
         winnerId,
-
         loserId,
-
         arm,
-
         hiddenRankingAdjustment:
           hidePublicActivity,
       }
@@ -1450,13 +1533,10 @@ export default async (
       status,
       {
         ok: false,
-
         error:
           error?.status ===
           403
-
             ? "Google denied access. Check that the service-account email has Viewer access to the Competitor sheet and Editor access to the Match sheet."
-
             : error?.message ||
               "Unexpected match-entry backend error.",
       }
