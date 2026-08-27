@@ -1431,14 +1431,21 @@ function AnimatedRankRows({
           const newIndex = finalOrder.indexOf(key);
 
           if (oldIndex >= 0 && newIndex >= 0) {
-            // Visible baseline rows use their exact previous DOM position.
+            // Historical replay is based on rank indices, never viewport coordinates.
             // Someone who was below the displayed cutoff starts at the bottom edge.
             if (oldIndex < limit) {
-              // Prefer the exact previous DOM coordinate when available, but
-              // fall back to rank-index geometry for cards that were off-screen.
-              dy = oldRect
-                ? oldRect.top - newRect.top
-                : (oldIndex - newIndex) * rowPitch;
+              /*
+               * IMPORTANT: historical replay uses RANK INDEX geometry only.
+               *
+               * Do NOT use oldRect.top here. getBoundingClientRect() is relative
+               * to the viewport, so a ladder measured while it is below the
+               * screen can be hundreds/thousands of pixels away after the user
+               * scrolls to it. Using those old viewport coordinates makes the
+               * entire ladder falsely animate upward by the scroll distance.
+               *
+               * old rank -> new rank is the only movement that matters.
+               */
+              dy = (oldIndex - newIndex) * rowPitch;
             } else {
               // A climber that started below the displayed cutoff enters from
               // the bottom edge and travels upward to the rank they earned.
