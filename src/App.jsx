@@ -1165,6 +1165,7 @@ function AnimatedRankRows({
   const replayTimerRef = useRef(null);
   const previousRectsRef = useRef(new Map());
   const animateNextRef = useRef(false);
+  const animationModeRef = useRef("none"); // "replay" | "live" | "none"
   const pulseEventsRef = useRef([]);
   const [inView, setInView] = useState(false);
 
@@ -1203,6 +1204,7 @@ function AnimatedRankRows({
       if (replayTimerRef.current) clearTimeout(replayTimerRef.current);
       replayFinishedRef.current = true;
       animateNextRef.current = false;
+      animationModeRef.current = "none";
       pulseEventsRef.current = [];
       setDisplayedItems(items);
       return;
@@ -1216,30 +1218,50 @@ function AnimatedRankRows({
       return;
     }
 
+    /*
+     * Historical replay is intentionally COLLAPSED into one calm transition:
+     * show the ranking as it stood at the start of the 30-day window, then let
+     * every changed row float into its current place together. This avoids a
+     * busy card "machine-gunning" through every intermediate match result.
+     *
+     * Public takeover/defense events are still remembered so the competitors
+     * responsible for recent activity receive the appropriate glow after the
+     * movement settles. Badge? = FALSE frames never carry an event, so hidden
+     * adjustments remain visually silent.
+     */
     replayStartedRef.current = true;
-    let index = 1;
-    const animatedFrameCount = frames.filter((f) => f.animate).length;
-    const stepDelay = animatedFrameCount > 14 ? 280 : animatedFrameCount > 8 ? 360 : animatedFrameCount > 4 ? 470 : 620;
 
-    const advance = () => {
-      if (index >= frames.length) {
+    const finalFrame = frames[frames.length - 1];
+    const publicEvents = frames
+      .filter((frame) => frame.animate && frame.event)
+      .map((frame) => frame.event);
+
+    // A competitor only needs one pulse of each type during the collapsed replay.
+    const uniquePulseEvents = Array.from(
+      new Map(
+        publicEvents.map((event) => [
+          `${event.type}:${event.winner_id}`,
+          event,
+        ])
+      ).values()
+    );
+
+    replayTimerRef.current = setTimeout(() => {
+      animateNextRef.current = true;
+      animationModeRef.current = "replay";
+      pulseEventsRef.current = uniquePulseEvents;
+      setDisplayedItems(finalFrame.items);
+
+      // Mark replay complete after the long float/glow has had time to finish.
+      replayTimerRef.current = setTimeout(() => {
         replayFinishedRef.current = true;
-        replayTimerRef.current = setTimeout(() => {
-          animateNextRef.current = false;
-          pulseEventsRef.current = [];
-          setDisplayedItems(items);
-        }, 120);
-        return;
-      }
-
-      const frame = frames[index++];
-      animateNextRef.current = Boolean(frame.animate);
-      pulseEventsRef.current = frame.event ? [frame.event] : [];
-      setDisplayedItems(frame.items);
-      replayTimerRef.current = setTimeout(advance, frame.animate ? stepDelay : 90);
-    };
-
-    replayTimerRef.current = setTimeout(advance, 260);
+        animateNextRef.current = false;
+        animationModeRef.current = "none";
+        pulseEventsRef.current = [];
+        // Sync to the latest live data in case the sheet changed during replay.
+        setDisplayedItems(items);
+      }, 2500);
+    }, 360);
   }, [inView, displayMode]);
 
   // Once the initial replay is finished, every genuinely new public match can animate the existing rows
@@ -1248,10 +1270,12 @@ function AnimatedRankRows({
     if (!replayFinishedRef.current) return;
     if ((liveEvents || []).length > 0) {
       animateNextRef.current = true;
+      animationModeRef.current = "live";
       pulseEventsRef.current = liveEvents;
       setDisplayedItems(items);
     } else {
       animateNextRef.current = false;
+      animationModeRef.current = "none";
       pulseEventsRef.current = [];
       setDisplayedItems(items);
     }
@@ -1260,12 +1284,24 @@ function AnimatedRankRows({
   useLayoutEffect(() => {
     const node = containerRef.current;
     if (!node) return;
+
     const elements = Array.from(node.querySelectorAll("[data-rank-key]"));
     const nextRects = new Map();
     elements.forEach((el) => nextRects.set(el.dataset.rankKey, el.getBoundingClientRect()));
 
     if (animateNextRef.current && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
       const oldRects = previousRectsRef.current;
+      const mode = animationModeRef.current;
+      const isReplay = mode === "replay";
+
+      // Replay should feel like a slow ranking board settling into place.
+      // Live results remain punchier, but are still smoother than before.
+      const moveDuration = isReplay ? 1650 : 1050;
+      const enterDuration = isReplay ? 1250 : 760;
+      const easing = isReplay
+        ? "cubic-bezier(.22,.72,.18,1)"
+        : "cubic-bezier(.18,.82,.20,1)";
+
       elements.forEach((el) => {
         const key = el.dataset.rankKey;
         const oldRect = oldRects.get(key);
@@ -1274,48 +1310,106 @@ function AnimatedRankRows({
 
         if (oldRect) {
           const dy = oldRect.top - newRect.top;
+
           if (Math.abs(dy) > 1) {
             el.animate(
               [
-                { transform: `translateY(${dy}px)`, zIndex: 4 },
-                { transform: "translateY(0)", zIndex: 4 },
+                {
+                  transform: `translate3d(0, ${dy}px, 0)`,
+                  zIndex: 4,
+                },
+                {
+                  transform: "translate3d(0, 0, 0)",
+                  zIndex: 4,
+                },
               ],
-              { duration: 720, easing: "cubic-bezier(.18,.86,.22,1)", fill: "both" }
+              {
+                duration: moveDuration,
+                easing,
+                fill: "both",
+              }
             );
-            el.classList.add(dy > 0 ? "fx-live-up" : "fx-live-down");
+
+            // During historical replay, avoid lighting up every displaced row.
+            // The smooth physical movement is enough; only actual event winners glow.
+            if (!isReplay) {
+              el.classList.add(dy > 0 ? "fx-live-up" : "fx-live-down");
+            }
           }
         } else {
           el.animate(
             [
-              { opacity: 0, transform: "translateY(12px) scale(.985)" },
-              { opacity: 1, transform: "translateY(0) scale(1)" },
+              {
+                opacity: 0,
+                transform: isReplay
+                  ? "translate3d(0, 18px, 0) scale(.99)"
+                  : "translate3d(0, 12px, 0) scale(.985)",
+              },
+              {
+                opacity: 1,
+                transform: "translate3d(0, 0, 0) scale(1)",
+              },
             ],
-            { duration: 520, easing: "cubic-bezier(.2,.8,.2,1)" }
+            {
+              duration: enterDuration,
+              easing,
+              fill: "both",
+            }
           );
         }
       });
 
       (pulseEventsRef.current || []).forEach((event) => {
-        const winner = node.querySelector(`[data-rank-key="${CSS.escape(event.winner_id)}"]`);
+        const winner = node.querySelector(
+          `[data-rank-key="${CSS.escape(event.winner_id)}"]`
+        );
+
         if (winner) {
-          winner.classList.add(event.type === "defense" ? "fx-defense" : "fx-takeover");
-          const currentWinner = displayedItems.find((p) => p.id === event.winner_id);
-          if (event.type === "takeover" && currentWinner?.rank === 1) winner.classList.add("fx-champion");
+          winner.classList.add(
+            event.type === "defense" ? "fx-defense" : "fx-takeover"
+          );
+
+          const currentWinner = displayedItems.find(
+            (p) => p.id === event.winner_id
+          );
+
+          if (event.type === "takeover" && currentWinner?.rank === 1) {
+            winner.classList.add("fx-champion");
+          }
         }
-        (event.displaced_ids || []).forEach((id) => {
-          const displaced = node.querySelector(`[data-rank-key="${CSS.escape(id)}"]`);
-          if (displaced) displaced.classList.add("fx-displaced");
-        });
+
+        // Red displaced-row flashes are useful for one live match, but make a
+        // 30-day replay visually noisy. Keep them live-only.
+        if (!isReplay) {
+          (event.displaced_ids || []).forEach((id) => {
+            const displaced = node.querySelector(
+              `[data-rank-key="${CSS.escape(id)}"]`
+            );
+            if (displaced) displaced.classList.add("fx-displaced");
+          });
+        }
       });
 
+      const cleanupDelay = isReplay ? 2650 : 2450;
       const cleanup = setTimeout(() => {
-        elements.forEach((el) => el.classList.remove("fx-live-up", "fx-live-down", "fx-takeover", "fx-defense", "fx-displaced", "fx-champion"));
-      }, 1250);
-      setTimeout(() => clearTimeout(cleanup), 1400);
+        elements.forEach((el) =>
+          el.classList.remove(
+            "fx-live-up",
+            "fx-live-down",
+            "fx-takeover",
+            "fx-defense",
+            "fx-displaced",
+            "fx-champion"
+          )
+        );
+      }, cleanupDelay);
+
+      setTimeout(() => clearTimeout(cleanup), cleanupDelay + 150);
     }
 
     previousRectsRef.current = nextRects;
     animateNextRef.current = false;
+    animationModeRef.current = "none";
   }, [displayedItems]);
 
   return (
@@ -2091,20 +2185,21 @@ export default function App() {
         .rank-row.recent { animation:recentGlow 1.15s ease-out both; }
 
         .animated-rank-list { position:relative; }
-        .rank-row.fx-live-up { box-shadow:inset 0 0 0 1px rgba(52,211,153,.62), 0 0 26px rgba(52,211,153,.20); }
-        .rank-row.fx-live-down, .rank-row.fx-displaced { box-shadow:inset 0 0 0 1px rgba(251,113,133,.42), 0 0 18px rgba(251,113,133,.10); }
-        .rank-row.fx-takeover { overflow:hidden; animation:takeoverImpact 1.05s ease-out both!important; }
-        .rank-row.fx-takeover::after { content:""; position:absolute; z-index:8; pointer-events:none; width:52%; height:220%; top:-60%; left:-70%; transform:rotate(-18deg); background:linear-gradient(90deg,transparent,var(--rank-fx-slash,rgba(52,211,153,.95)),rgba(255,255,255,.9),transparent); filter:blur(.4px); opacity:0; animation:rankSlash .72s cubic-bezier(.2,.8,.2,1) both; }
-        .rank-row.fx-defense { animation:defenseImpact 1.05s ease-out both!important; }
+        .animated-rank-list .rank-row { will-change:transform; backface-visibility:hidden; transform:translateZ(0); }
+        .rank-row.fx-live-up { box-shadow:inset 0 0 0 1px rgba(52,211,153,.48), 0 0 24px rgba(52,211,153,.14); }
+        .rank-row.fx-live-down, .rank-row.fx-displaced { box-shadow:inset 0 0 0 1px rgba(251,113,133,.30), 0 0 16px rgba(251,113,133,.07); }
+        .rank-row.fx-takeover { overflow:hidden; animation:takeoverImpact 2.35s ease-out both!important; }
+        .rank-row.fx-takeover::after { content:""; position:absolute; z-index:8; pointer-events:none; width:52%; height:220%; top:-60%; left:-70%; transform:rotate(-18deg); background:linear-gradient(90deg,transparent,var(--rank-fx-slash,rgba(52,211,153,.95)),rgba(255,255,255,.9),transparent); filter:blur(.4px); opacity:0; animation:rankSlash 1.05s cubic-bezier(.2,.78,.18,1) both; }
+        .rank-row.fx-defense { animation:defenseImpact 2.4s ease-out both!important; }
         .rank-row.fx-champion { animation:championImpact 1.25s ease-out both!important; }
         .rank-row.fx-champion .rank-num { animation:crownPop .9s cubic-bezier(.18,.9,.24,1.35) both; }
-        .rank-shell.theme-newcastle { --rank-fx-slash:rgba(34,211,238,.98); --rank-fx-glow:rgba(34,211,238,.26); }
+        .rank-shell.theme-newcastle { --rank-fx-slash:rgba(34,211,238,.98); --rank-fx-glow:rgba(52,211,153,.26); }
         .rank-shell.theme-sydney { --rank-fx-slash:rgba(245,197,66,.98); --rank-fx-glow:rgba(52,211,153,.22); }
         .display-mode-toggle { margin:18px auto 2px; width:max-content; max-width:100%; display:flex; align-items:center; gap:9px; padding:7px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.10); background:rgba(5,9,20,.50); color:rgba(255,255,255,.62); font-size:10.5px; }
         .display-mode-toggle input { accent-color:#f5c542; }
         @keyframes rankSlash { 0% { left:-70%; opacity:0; } 16% { opacity:.9; } 72% { opacity:.65; } 100% { left:125%; opacity:0; } }
-        @keyframes takeoverImpact { 0% { box-shadow:0 0 0 0 var(--rank-fx-glow,rgba(52,211,153,.2)); } 35% { box-shadow:inset 0 0 0 1px rgba(245,197,66,.64),0 0 34px var(--rank-fx-glow,rgba(52,211,153,.2)); } 100% { box-shadow:none; } }
-        @keyframes defenseImpact { 0% { box-shadow:0 0 0 0 rgba(96,165,250,.0); } 35% { box-shadow:inset 0 0 0 2px rgba(96,165,250,.78),0 0 30px rgba(96,165,250,.20); } 100% { box-shadow:none; } }
+        @keyframes takeoverImpact { 0% { box-shadow:0 0 0 0 rgba(52,211,153,0); } 18% { box-shadow:inset 0 0 0 1px rgba(245,197,66,.72),0 0 38px rgba(52,211,153,.28); } 58% { box-shadow:inset 0 0 0 1px rgba(52,211,153,.42),0 0 28px rgba(52,211,153,.18); } 100% { box-shadow:none; } }
+        @keyframes defenseImpact { 0% { box-shadow:0 0 0 0 rgba(226,232,240,0); } 18% { box-shadow:inset 0 0 0 2px rgba(241,245,249,.92),0 0 38px rgba(226,232,240,.28); } 58% { box-shadow:inset 0 0 0 1px rgba(203,213,225,.55),0 0 28px rgba(226,232,240,.16); } 100% { box-shadow:none; } }
         @keyframes championImpact { 0% { box-shadow:0 0 0 0 rgba(245,197,66,0); } 30% { box-shadow:inset 0 0 0 1px rgba(245,197,66,.92),0 0 46px rgba(245,197,66,.32); } 100% { box-shadow:none; } }
         @keyframes crownPop { 0% { transform:scale(1); } 38% { transform:scale(1.35) rotate(-5deg); } 68% { transform:scale(.96) rotate(2deg); } 100% { transform:scale(1); } }
         .rank-num { width:32px; height:32px; display:grid; place-items:center; border-radius:10px; font-weight:900; background:rgba(255,255,255,.055); flex:0 0 32px; }
