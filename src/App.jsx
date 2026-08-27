@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Papa from "papaparse";
 
 /* ===================== GROUPS & DISPLAY ===================== */
@@ -1072,6 +1072,274 @@ function MatchEntryPage({ players, accessToken, onBack, onReload, pageStyle, gla
 }
 
 
+
+/* ===================== LIVE RANK ANIMATIONS ===================== */
+const RANK_REPLAY_DAYS = 30;
+
+function rankAnimationEventKey(e) {
+  return `${e?.matchKey || ""}|${e?.wc || ""}|${e?.type || ""}|${e?.winner_id || ""}|${e?.loser_id || ""}`;
+}
+
+function rankOrderSignature(items) {
+  return (items || []).map((p) => p.id).join("|");
+}
+
+function animationDisplayLadder(wc, ladder) {
+  return (ladder || []);
+}
+
+function buildInitialRankReplayFrames(players, matches) {
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - RANK_REPLAY_DAYS);
+
+  const sorted = (matches || [])
+    .filter((m) => m._parsedDate)
+    .slice()
+    .sort((a, b) => {
+      const at = a._parsedDate.getTime();
+      const bt = b._parsedDate.getTime();
+      if (at !== bt) return at - bt;
+      return (a._rowIndex ?? 0) - (b._rowIndex ?? 0);
+    });
+
+  const beforeWindow = sorted.filter((m) => m._parsedDate < cutoff);
+  const recent = sorted.filter((m) => m._parsedDate >= cutoff);
+  const working = beforeWindow.slice();
+  let data = computeLaddersThroughDate(players, working, CONFIG.weightClasses, null);
+
+  const frames = Object.fromEntries(
+    CONFIG.weightClasses.map((wc) => [
+      wc,
+      [{ items: animationDisplayLadder(wc, data.ladders[wc] || []), event: null, animate: false }],
+    ])
+  );
+
+  recent.forEach((match) => {
+    working.push(match);
+    data = computeLaddersThroughDate(players, working, CONFIG.weightClasses, null);
+
+    // Hidden ranking adjustments still alter the internal state, but never receive a visible replay frame.
+    if (match._badgeSuppressed) return;
+
+    const events = (data.eventLog || []).filter((e) => e.matchKey === match._stableKey);
+    events.forEach((event) => {
+      if (!frames[event.wc]) return;
+      frames[event.wc].push({
+        items: animationDisplayLadder(event.wc, data.ladders[event.wc] || []),
+        event,
+        animate: true,
+      });
+    });
+  });
+
+  // A hidden adjustment may occur after the final public event. End every replay on the real current order,
+  // but make that final correction silently so Badge? = FALSE remains visually invisible.
+  const finalData = computeLaddersThroughDate(players, sorted, CONFIG.weightClasses, null);
+  CONFIG.weightClasses.forEach((wc) => {
+    const finalItems = animationDisplayLadder(wc, finalData.ladders[wc] || []);
+    const list = frames[wc] || [];
+    const last = list[list.length - 1]?.items || [];
+    if (rankOrderSignature(last) !== rankOrderSignature(finalItems)) {
+      list.push({ items: finalItems, event: null, animate: false });
+    }
+  });
+
+  return frames;
+}
+
+function AnimatedRankRows({
+  wc,
+  items,
+  replayFrames,
+  displayMode,
+  liveEvents,
+  onSelect,
+  getRowClass,
+  renderRow,
+}) {
+  const containerRef = useRef(null);
+  const replayFramesRef = useRef(replayFrames || []);
+  const replayStartedRef = useRef(false);
+  const replayFinishedRef = useRef(displayMode || (replayFrames || []).length <= 1);
+  const replayTimerRef = useRef(null);
+  const previousRectsRef = useRef(new Map());
+  const animateNextRef = useRef(false);
+  const pulseEventsRef = useRef([]);
+  const [inView, setInView] = useState(false);
+
+  const initialItems = !displayMode && (replayFrames || []).length > 1
+    ? replayFrames[0].items
+    : items;
+  const [displayedItems, setDisplayedItems] = useState(initialItems);
+
+  const currentSignature = rankOrderSignature(items);
+  const liveSignature = (liveEvents || []).map(rankAnimationEventKey).join("||");
+
+  useEffect(() => {
+    const node = containerRef.current;
+    if (!node) return undefined;
+    if (typeof IntersectionObserver === "undefined") {
+      setInView(true);
+      return undefined;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => setInView(Boolean(entry?.isIntersecting)),
+      { threshold: 0.12 }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (replayTimerRef.current) clearTimeout(replayTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (displayMode) {
+      if (replayTimerRef.current) clearTimeout(replayTimerRef.current);
+      replayFinishedRef.current = true;
+      animateNextRef.current = false;
+      pulseEventsRef.current = [];
+      setDisplayedItems(items);
+      return;
+    }
+
+    if (!inView || replayStartedRef.current || replayFinishedRef.current) return;
+    const frames = replayFramesRef.current || [];
+    if (frames.length <= 1) {
+      replayFinishedRef.current = true;
+      setDisplayedItems(items);
+      return;
+    }
+
+    replayStartedRef.current = true;
+    let index = 1;
+    const animatedFrameCount = frames.filter((f) => f.animate).length;
+    const stepDelay = animatedFrameCount > 14 ? 280 : animatedFrameCount > 8 ? 360 : animatedFrameCount > 4 ? 470 : 620;
+
+    const advance = () => {
+      if (index >= frames.length) {
+        replayFinishedRef.current = true;
+        replayTimerRef.current = setTimeout(() => {
+          animateNextRef.current = false;
+          pulseEventsRef.current = [];
+          setDisplayedItems(items);
+        }, 120);
+        return;
+      }
+
+      const frame = frames[index++];
+      animateNextRef.current = Boolean(frame.animate);
+      pulseEventsRef.current = frame.event ? [frame.event] : [];
+      setDisplayedItems(frame.items);
+      replayTimerRef.current = setTimeout(advance, frame.animate ? stepDelay : 90);
+    };
+
+    replayTimerRef.current = setTimeout(advance, 260);
+  }, [inView, displayMode]);
+
+  // Once the initial replay is finished, every genuinely new public match can animate the existing rows
+  // from their old DOM positions to their new positions. Hidden-only changes sync silently.
+  useEffect(() => {
+    if (!replayFinishedRef.current) return;
+    if ((liveEvents || []).length > 0) {
+      animateNextRef.current = true;
+      pulseEventsRef.current = liveEvents;
+      setDisplayedItems(items);
+    } else {
+      animateNextRef.current = false;
+      pulseEventsRef.current = [];
+      setDisplayedItems(items);
+    }
+  }, [currentSignature, liveSignature]);
+
+  useLayoutEffect(() => {
+    const node = containerRef.current;
+    if (!node) return;
+    const elements = Array.from(node.querySelectorAll("[data-rank-key]"));
+    const nextRects = new Map();
+    elements.forEach((el) => nextRects.set(el.dataset.rankKey, el.getBoundingClientRect()));
+
+    if (animateNextRef.current && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
+      const oldRects = previousRectsRef.current;
+      elements.forEach((el) => {
+        const key = el.dataset.rankKey;
+        const oldRect = oldRects.get(key);
+        const newRect = nextRects.get(key);
+        if (!newRect) return;
+
+        if (oldRect) {
+          const dy = oldRect.top - newRect.top;
+          if (Math.abs(dy) > 1) {
+            el.animate(
+              [
+                { transform: `translateY(${dy}px)`, zIndex: 4 },
+                { transform: "translateY(0)", zIndex: 4 },
+              ],
+              { duration: 720, easing: "cubic-bezier(.18,.86,.22,1)", fill: "both" }
+            );
+            el.classList.add(dy > 0 ? "fx-live-up" : "fx-live-down");
+          }
+        } else {
+          el.animate(
+            [
+              { opacity: 0, transform: "translateY(12px) scale(.985)" },
+              { opacity: 1, transform: "translateY(0) scale(1)" },
+            ],
+            { duration: 520, easing: "cubic-bezier(.2,.8,.2,1)" }
+          );
+        }
+      });
+
+      (pulseEventsRef.current || []).forEach((event) => {
+        const winner = node.querySelector(`[data-rank-key="${CSS.escape(event.winner_id)}"]`);
+        if (winner) {
+          winner.classList.add(event.type === "defense" ? "fx-defense" : "fx-takeover");
+          const currentWinner = displayedItems.find((p) => p.id === event.winner_id);
+          if (event.type === "takeover" && currentWinner?.rank === 1) winner.classList.add("fx-champion");
+        }
+        (event.displaced_ids || []).forEach((id) => {
+          const displaced = node.querySelector(`[data-rank-key="${CSS.escape(id)}"]`);
+          if (displaced) displaced.classList.add("fx-displaced");
+        });
+      });
+
+      const cleanup = setTimeout(() => {
+        elements.forEach((el) => el.classList.remove("fx-live-up", "fx-live-down", "fx-takeover", "fx-defense", "fx-displaced", "fx-champion"));
+      }, 1250);
+      setTimeout(() => clearTimeout(cleanup), 1400);
+    }
+
+    previousRectsRef.current = nextRects;
+    animateNextRef.current = false;
+  }, [displayedItems]);
+
+  return (
+    <div ref={containerRef} className="animated-rank-list">
+      {displayedItems.map((p) => (
+        <div
+          key={`${wc}:${p.id}`}
+          data-rank-key={p.id}
+          className={`rank-row ${getRowClass(p)}`}
+          onClick={() => onSelect(p.id)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") onSelect(p.id);
+          }}
+        >
+          {renderRow(p)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
 /* ===================== APP ===================== */
 export default function App() {
   const [players, setPlayers] = useState([]);
@@ -1093,6 +1361,19 @@ export default function App() {
   });
   const [matchEntryToken, setMatchEntryToken] = useState(initialMatchEntryToken);
   const matchEntryMode = Boolean(matchEntryToken);
+  const [displayMode, setDisplayMode] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(`rank-display-mode:${CONFIG.branding.clubName}`) === "1";
+  });
+  const [initialReplayFrames, setInitialReplayFrames] = useState(null);
+  const initialReplayFramesRef = useRef(null);
+  const loadedMatchKeysRef = useRef(null);
+  const [liveMatchKeys, setLiveMatchKeys] = useState([]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(`rank-display-mode:${CONFIG.branding.clubName}`, displayMode ? "1" : "0");
+  }, [displayMode]);
 
   async function loadAll() {
     setError("");
@@ -1256,6 +1537,23 @@ export default function App() {
         })
         .filter((x) => x.date && x.arm && x.winner_id && x.loser_id);
 
+      const nextMatchKeys = new Set(m.map((match) => match._stableKey));
+      if (loadedMatchKeysRef.current === null) {
+        setLiveMatchKeys([]);
+      } else {
+        const freshPublicKeys = m
+          .filter((match) => !loadedMatchKeysRef.current.has(match._stableKey) && !match._badgeSuppressed)
+          .map((match) => match._stableKey);
+        setLiveMatchKeys(freshPublicKeys);
+      }
+      loadedMatchKeysRef.current = nextMatchKeys;
+
+      if (!initialReplayFramesRef.current) {
+        const frames = buildInitialRankReplayFrames(p, m);
+        initialReplayFramesRef.current = frames;
+        setInitialReplayFrames(frames);
+      }
+
       setPlayers(p);
       setMatches(m);
       setLastUpdated(new Date());
@@ -1339,6 +1637,12 @@ export default function App() {
     const now = computeLaddersThroughDate(players, matches, CONFIG.weightClasses, null);
     return { nowData: now, cutoff: cutoffDate };
   }, [players, matches, windowDays, showBadges]);
+
+  const liveEventSet = useMemo(() => new Set(liveMatchKeys), [liveMatchKeys]);
+  const liveEvents = useMemo(
+    () => (nowData.eventLog || []).filter((event) => liveEventSet.has(event.matchKey)),
+    [nowData.eventLog, liveEventSet]
+  );
 
   const playerById = useMemo(
     () => new Map(players.map((p) => [p.id, p])),
@@ -1785,6 +2089,24 @@ export default function App() {
         .rank-row.silver { background:linear-gradient(90deg,rgba(210,214,224,.11),rgba(210,214,224,.03)); border:1px solid rgba(210,214,224,.16); }
         .rank-row.bronze { background:linear-gradient(90deg,rgba(191,131,92,.11),rgba(191,131,92,.03)); border:1px solid rgba(191,131,92,.16); }
         .rank-row.recent { animation:recentGlow 1.15s ease-out both; }
+
+        .animated-rank-list { position:relative; }
+        .rank-row.fx-live-up { box-shadow:inset 0 0 0 1px rgba(52,211,153,.62), 0 0 26px rgba(52,211,153,.20); }
+        .rank-row.fx-live-down, .rank-row.fx-displaced { box-shadow:inset 0 0 0 1px rgba(251,113,133,.42), 0 0 18px rgba(251,113,133,.10); }
+        .rank-row.fx-takeover { overflow:hidden; animation:takeoverImpact 1.05s ease-out both!important; }
+        .rank-row.fx-takeover::after { content:""; position:absolute; z-index:8; pointer-events:none; width:52%; height:220%; top:-60%; left:-70%; transform:rotate(-18deg); background:linear-gradient(90deg,transparent,var(--rank-fx-slash,rgba(52,211,153,.95)),rgba(255,255,255,.9),transparent); filter:blur(.4px); opacity:0; animation:rankSlash .72s cubic-bezier(.2,.8,.2,1) both; }
+        .rank-row.fx-defense { animation:defenseImpact 1.05s ease-out both!important; }
+        .rank-row.fx-champion { animation:championImpact 1.25s ease-out both!important; }
+        .rank-row.fx-champion .rank-num { animation:crownPop .9s cubic-bezier(.18,.9,.24,1.35) both; }
+        .rank-shell.theme-newcastle { --rank-fx-slash:rgba(34,211,238,.98); --rank-fx-glow:rgba(34,211,238,.26); }
+        .rank-shell.theme-sydney { --rank-fx-slash:rgba(245,197,66,.98); --rank-fx-glow:rgba(52,211,153,.22); }
+        .display-mode-toggle { margin:18px auto 2px; width:max-content; max-width:100%; display:flex; align-items:center; gap:9px; padding:7px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.10); background:rgba(5,9,20,.50); color:rgba(255,255,255,.62); font-size:10.5px; }
+        .display-mode-toggle input { accent-color:#f5c542; }
+        @keyframes rankSlash { 0% { left:-70%; opacity:0; } 16% { opacity:.9; } 72% { opacity:.65; } 100% { left:125%; opacity:0; } }
+        @keyframes takeoverImpact { 0% { box-shadow:0 0 0 0 var(--rank-fx-glow,rgba(52,211,153,.2)); } 35% { box-shadow:inset 0 0 0 1px rgba(245,197,66,.64),0 0 34px var(--rank-fx-glow,rgba(52,211,153,.2)); } 100% { box-shadow:none; } }
+        @keyframes defenseImpact { 0% { box-shadow:0 0 0 0 rgba(96,165,250,.0); } 35% { box-shadow:inset 0 0 0 2px rgba(96,165,250,.78),0 0 30px rgba(96,165,250,.20); } 100% { box-shadow:none; } }
+        @keyframes championImpact { 0% { box-shadow:0 0 0 0 rgba(245,197,66,0); } 30% { box-shadow:inset 0 0 0 1px rgba(245,197,66,.92),0 0 46px rgba(245,197,66,.32); } 100% { box-shadow:none; } }
+        @keyframes crownPop { 0% { transform:scale(1); } 38% { transform:scale(1.35) rotate(-5deg); } 68% { transform:scale(.96) rotate(2deg); } 100% { transform:scale(1); } }
         .rank-num { width:32px; height:32px; display:grid; place-items:center; border-radius:10px; font-weight:900; background:rgba(255,255,255,.055); flex:0 0 32px; }
         .rank-row.champion .rank-num { color:#ffe792; background:rgba(245,197,66,.13); }
         .rank-row.silver .rank-num { color:#eef2ff; background:rgba(210,214,224,.12); }
@@ -1811,7 +2133,7 @@ export default function App() {
         }
       `}</style>
 
-      <div className="rank-shell">
+      <div className="rank-shell theme-sydney">
         <div className="topbar">
           {CONFIG.branding.logoUrl && (
             <img src={CONFIG.branding.logoUrl} alt="logo" className="brand-logo" />
@@ -2066,51 +2388,74 @@ export default function App() {
                       No matching competitor in this class.
                     </div>
                   ) : (
-                    filtered.map((p) => {
-                      const key = `${wc}:${p.id}`;
-                      const movement = recentVisibleMovement.get(key) || 0;
-                      const takeoverWhen = nowData.lastTakeoverMap.get(key) || null;
-                      const defenseWhen = nowData.lastDefenseMap.get(key) || null;
-                      const isRecentTakeover = Boolean(showBadges && takeoverWhen && takeoverWhen >= cutoff);
-                      const isRecentDefense = Boolean(showBadges && defenseWhen && defenseWhen >= cutoff);
-                      const recent = isRecentTakeover || isRecentDefense || movement !== 0;
-
-                      return (
-                        <div
-                          key={`${wc}:${p.id}`}
-                          className={`rank-row ${p.rank === 1 ? "champion" : p.rank === 2 ? "silver" : p.rank === 3 ? "bronze" : ""} ${recent ? "recent" : ""}`}
-                          onClick={() => setSelectedPlayerId(p.id)}
-                          role="button"
-                          tabIndex={0}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") setSelectedPlayerId(p.id);
-                          }}
-                        >
-                          <div className="rank-num">{p.rank === 1 ? "👑" : p.rank}</div>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
-                              <span style={{ fontWeight: 820, letterSpacing: 0.1, overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</span>
-                              {isRecentTakeover && <span title="Took rank" style={{ color: gold }}>★</span>}
-                              {isRecentDefense && <span title="Defended">🛡️</span>}
-                              {showBadges && movement > 0 && (
-                                <span title={`Up ${movement} from visible ranking matches in selected window`} style={{ color: green, fontSize: 11, fontWeight: 900 }}>↑ {movement}</span>
-                              )}
-                              {showBadges && movement < 0 && (
-                                <span title={`Down ${Math.abs(movement)} from visible ranking matches in selected window`} style={{ color: red, fontSize: 11, fontWeight: 850 }}>↓ {Math.abs(movement)}</span>
-                              )}
+                    <AnimatedRankRows
+                      wc={wc}
+                      items={filtered}
+                      replayFrames={
+                        searchLower
+                          ? []
+                          : (initialReplayFrames?.[wc] || []).map((frame) => ({
+                              ...frame,
+                              items: frame.items.slice(0, 15),
+                            }))
+                      }
+                      displayMode={displayMode}
+                      liveEvents={liveEvents.filter((event) => event.wc === wc)}
+                      onSelect={setSelectedPlayerId}
+                      getRowClass={(p) => {
+                        const key = `${wc}:${p.id}`;
+                        const movement = recentVisibleMovement.get(key) || 0;
+                        const takeoverWhen = nowData.lastTakeoverMap.get(key) || null;
+                        const defenseWhen = nowData.lastDefenseMap.get(key) || null;
+                        const isRecentTakeover = Boolean(showBadges && takeoverWhen && takeoverWhen >= cutoff);
+                        const isRecentDefense = Boolean(showBadges && defenseWhen && defenseWhen >= cutoff);
+                        const recent = isRecentTakeover || isRecentDefense || movement !== 0;
+                        return `${p.rank === 1 ? "champion" : p.rank === 2 ? "silver" : p.rank === 3 ? "bronze" : ""} ${recent ? "recent" : ""}`;
+                      }}
+                      renderRow={(p) => {
+                        const key = `${wc}:${p.id}`;
+                        const movement = recentVisibleMovement.get(key) || 0;
+                        const takeoverWhen = nowData.lastTakeoverMap.get(key) || null;
+                        const defenseWhen = nowData.lastDefenseMap.get(key) || null;
+                        const isRecentTakeover = Boolean(showBadges && takeoverWhen && takeoverWhen >= cutoff);
+                        const isRecentDefense = Boolean(showBadges && defenseWhen && defenseWhen >= cutoff);
+                        return (
+                          <>
+                            <div className="rank-num">{p.rank === 1 ? "👑" : p.rank}</div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+                                <span style={{ fontWeight: 820, letterSpacing: 0.1, overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</span>
+                                {isRecentTakeover && <span title="Took rank" style={{ color: gold }}>★</span>}
+                                {isRecentDefense && <span title="Defended">🛡️</span>}
+                                {showBadges && movement > 0 && (
+                                  <span title={`Up ${movement} from visible ranking matches in selected window`} style={{ color: green, fontSize: 11, fontWeight: 900 }}>↑ {movement}</span>
+                                )}
+                                {showBadges && movement < 0 && (
+                                  <span title={`Down ${Math.abs(movement)} from visible ranking matches in selected window`} style={{ color: red, fontSize: 11, fontWeight: 850 }}>↓ {Math.abs(movement)}</span>
+                                )}
+                              </div>
+                              <div style={{ fontSize: 10.5, opacity: 0.52, marginTop: 2 }}>Base · {prettyBaseLabel(p.weight_class)}</div>
                             </div>
-                            <div style={{ fontSize: 10.5, opacity: 0.52, marginTop: 2 }}>Base · {prettyBaseLabel(p.weight_class)}</div>
-                          </div>
-                          <div style={{ opacity: 0.35, fontSize: 16 }}>›</div>
-                        </div>
-                      );
-                    })
+                            <div style={{ opacity: 0.35, fontSize: 16 }}>›</div>
+                          </>
+                        );
+                      }}
+                    />
                   )}
                 </div>
               </section>
             );
           })}
         </div>
+
+        <label className="display-mode-toggle" title="Display Mode skips the 30-day replay when this page is opened; genuinely new live results still animate.">
+          <input
+            type="checkbox"
+            checked={displayMode}
+            onChange={(e) => setDisplayMode(e.target.checked)}
+          />
+          <span><strong style={{ color: "rgba(255,255,255,.78)" }}>Display Mode</strong> · live animations only</span>
+        </label>
       </div>
 
       {/* Competitor profile drawer */}
