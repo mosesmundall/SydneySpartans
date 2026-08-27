@@ -1088,6 +1088,132 @@ function animationDisplayLadder(wc, ladder) {
   return (ladder || []);
 }
 
+function buildDisplayResultAnnouncement(events, playerById) {
+  if (!(events || []).length) return null;
+
+  const grouped = new Map();
+
+  (events || []).forEach((event) => {
+    const key = event.matchKey || rankAnimationEventKey(event);
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        matchKey: key,
+        winner_id: event.winner_id,
+        loser_id: event.loser_id,
+        arm: event.arm,
+        rowIndex: event.rowIndex ?? 0,
+        events: [],
+      });
+    }
+    grouped.get(key).events.push(event);
+  });
+
+  const results = Array.from(grouped.values())
+    .sort((a, b) => (a.rowIndex ?? 0) - (b.rowIndex ?? 0))
+    .map((group) => {
+      const types = new Set(group.events.map((event) => event.type));
+      const type =
+        types.size === 1
+          ? group.events[0]?.type || "result"
+          : "mixed";
+
+      const classes = uniqueBy(
+        group.events.map((event) => classWithoutArm(event.wc)),
+        (x) => x
+      );
+
+      const maxJump = Math.max(
+        0,
+        ...group.events.map((event) => event.jump || 0)
+      );
+
+      return {
+        ...group,
+        type,
+        classes,
+        maxJump,
+        winnerName: playerById.get(group.winner_id)?.name || group.winner_id,
+        loserName: playerById.get(group.loser_id)?.name || group.loser_id,
+      };
+    });
+
+  return results.length ? { results } : null;
+}
+
+function DisplayResultAnnouncement({ announcement, visible }) {
+  if (!announcement?.results?.length) return null;
+
+  const results = announcement.results;
+  const single = results.length === 1 ? results[0] : null;
+
+  const typeLabel = single
+    ? single.type === "takeover"
+      ? "RANK TAKEOVER"
+      : single.type === "defense"
+      ? "RANK DEFENSE"
+      : "LIVE RESULT"
+    : `${results.length} LIVE RESULTS`;
+
+  const icon = single?.type === "defense" ? "🛡️" : single?.type === "takeover" ? "★" : "⚡";
+  const tone = single?.type === "defense" ? "defense" : single?.type === "takeover" ? "takeover" : "mixed";
+
+  return (
+    <div className={`display-result-layer ${visible ? "visible" : "hiding"}`}>
+      <div className={`display-result-card ${tone}`}>
+        <div className="display-result-icon">{icon}</div>
+
+        <div className="display-result-copy">
+          <div className="display-result-kicker">{typeLabel}</div>
+
+          {single ? (
+            <>
+              <div className="display-result-headline">
+                <strong>{single.winnerName}</strong>{" "}
+                {single.type === "takeover"
+                  ? "took rank from"
+                  : single.type === "defense"
+                  ? "defended their rank against"
+                  : "defeated"}{" "}
+                <strong>{single.loserName}</strong>
+              </div>
+
+              <div className="display-result-meta">
+                {String(single.arm || "").toUpperCase()} ARM
+                {single.classes.length ? ` · ${single.classes.join(" · ")}` : ""}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="display-result-headline">New results recorded</div>
+              <div className="display-result-multi">
+                {results.slice(0, 3).map((result) => (
+                  <div key={result.matchKey}>
+                    <strong>{result.winnerName}</strong>{" "}
+                    {result.type === "takeover"
+                      ? "took rank from"
+                      : result.type === "defense"
+                      ? "defended against"
+                      : "defeated"}{" "}
+                    <strong>{result.loserName}</strong>
+                    <span>
+                      {" "}· {String(result.arm || "").toUpperCase()}
+                      {result.classes.length ? ` · ${result.classes.join(", ")}` : ""}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+
+        {single?.type === "takeover" && single.maxJump > 0 && (
+          <div className="display-result-jump">↑ {single.maxJump}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function buildInitialRankReplayFrames(players, matches) {
   const cutoff = new Date();
   cutoff.setHours(0, 0, 0, 0);
@@ -1213,6 +1339,7 @@ function AnimatedRankRows({
   replayFrames,
   displayMode,
   liveEvents,
+  holdLiveUpdate = false,
   limit = 10,
   onSelect,
   getRowClass,
@@ -1368,7 +1495,7 @@ function AnimatedRankRows({
   // Once the initial replay is finished, every genuinely new public match can animate the existing rows
   // from their old DOM positions to their new positions. Hidden-only changes sync silently.
   useEffect(() => {
-    if (!replayFinishedRef.current) return;
+    if (!replayFinishedRef.current || holdLiveUpdate) return;
     if ((liveEvents || []).length > 0) {
       animateNextRef.current = true;
       animationModeRef.current = "live";
@@ -1380,7 +1507,7 @@ function AnimatedRankRows({
       pulseEventsRef.current = [];
       setDisplayedItems(items);
     }
-  }, [currentSignature, liveSignature]);
+  }, [currentSignature, liveSignature, holdLiveUpdate]);
 
   useLayoutEffect(() => {
     const node = containerRef.current;
@@ -1622,10 +1749,26 @@ export default function App() {
   const initialReplayFramesRef = useRef(null);
   const loadedMatchKeysRef = useRef(null);
   const [liveMatchKeys, setLiveMatchKeys] = useState([]);
+  const [displayAnnouncement, setDisplayAnnouncement] = useState(null);
+  const [displayAnnouncementVisible, setDisplayAnnouncementVisible] = useState(false);
+  const [displayLiveGateOpen, setDisplayLiveGateOpen] = useState(true);
+  const displayHandledLiveSignatureRef = useRef("");
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(`rank-display-mode:${CONFIG.branding.clubName}`, displayMode ? "1" : "0");
+
+    if (displayMode) {
+      setSearchTerm("");
+      setArmFilter("All");
+      setSelectedPlayerId(null);
+      setShowActivity(false);
+    } else {
+      setDisplayAnnouncement(null);
+      setDisplayAnnouncementVisible(false);
+      setDisplayLiveGateOpen(true);
+      displayHandledLiveSignatureRef.current = "";
+    }
   }, [displayMode]);
 
   async function loadAll() {
@@ -1902,6 +2045,58 @@ export default function App() {
     [players]
   );
 
+  const displayLiveSignature = useMemo(
+    () =>
+      Array.from(new Set((liveEvents || []).map((event) => event.matchKey)))
+        .filter(Boolean)
+        .sort()
+        .join("|"),
+    [liveEvents]
+  );
+
+  const displayLivePending =
+    displayMode &&
+    Boolean(displayLiveSignature) &&
+    (
+      displayHandledLiveSignatureRef.current !== displayLiveSignature ||
+      !displayLiveGateOpen
+    );
+
+  const releasedLiveEvents =
+    displayMode && displayLivePending
+      ? []
+      : liveEvents;
+
+  useEffect(() => {
+    if (!displayMode || !displayLiveSignature) return undefined;
+    if (displayHandledLiveSignatureRef.current === displayLiveSignature) return undefined;
+
+    const announcement = buildDisplayResultAnnouncement(liveEvents, playerById);
+    if (!announcement) return undefined;
+
+    displayHandledLiveSignatureRef.current = displayLiveSignature;
+    setDisplayLiveGateOpen(false);
+    setDisplayAnnouncement(announcement);
+    setDisplayAnnouncementVisible(true);
+
+    // Result card gets the stage first. It begins fading, then only after it has
+    // disappeared do we release the actual ladder movement.
+    const hideTimer = setTimeout(() => {
+      setDisplayAnnouncementVisible(false);
+    }, 2400);
+
+    const releaseTimer = setTimeout(() => {
+      setDisplayAnnouncement(null);
+      setDisplayLiveGateOpen(true);
+    }, 3000);
+
+    return () => {
+      clearTimeout(hideTimer);
+      clearTimeout(releaseTimer);
+    };
+  }, [displayMode, displayLiveSignature]);
+
+
   const ranksByPlayer = useMemo(() => {
     const map = new Map();
     Object.entries(nowData.ladders || {}).forEach(([wc, ladder]) => {
@@ -2128,7 +2323,7 @@ export default function App() {
     minHeight: "100vh",
     background: bgOverlay,
     color: "white",
-    padding: "clamp(14px, 2vw, 26px)",
+    padding: displayMode ? "clamp(10px, 1.2vw, 18px)" : "clamp(14px, 2vw, 26px)",
     fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
     backgroundSize: "cover",
     backgroundPosition: "center",
@@ -2341,7 +2536,7 @@ export default function App() {
         .rank-row.champion { background:linear-gradient(90deg,rgba(245,197,66,.14),rgba(245,197,66,.035)); border:1px solid rgba(245,197,66,.18); }
         .rank-row.silver { background:linear-gradient(90deg,rgba(210,214,224,.11),rgba(210,214,224,.03)); border:1px solid rgba(210,214,224,.16); }
         .rank-row.bronze { background:linear-gradient(90deg,rgba(191,131,92,.11),rgba(191,131,92,.03)); border:1px solid rgba(191,131,92,.16); }
-        .rank-row.recent { animation:recentGlow 1.15s ease-out both; }
+        .rank-row.recent { }
 
         .animated-rank-list { position:relative; }
         .animated-rank-list .rank-row { will-change:transform; backface-visibility:hidden; transform:translateZ(0); }
@@ -2356,6 +2551,147 @@ export default function App() {
         .rank-shell.theme-sydney { --rank-fx-slash:rgba(245,197,66,.98); --rank-fx-glow:rgba(52,211,153,.22); }
         .display-mode-toggle { margin:18px auto 2px; width:max-content; max-width:100%; display:flex; align-items:center; gap:9px; padding:7px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.10); background:rgba(5,9,20,.50); color:rgba(255,255,255,.62); font-size:10.5px; }
         .display-mode-toggle input { accent-color:#f5c542; }
+
+        /* Professional TV / projector presentation mode */
+        .rank-shell.display-mode { max-width:1900px; }
+        .rank-shell.display-mode .non-display-ui { display:none!important; }
+        .rank-shell.display-mode .desktop-subtitle { display:none!important; }
+        .rank-shell.display-mode .topbar { margin-bottom:12px; gap:16px; }
+        .rank-shell.display-mode .brand-logo { width:70px; height:70px; border-radius:17px; }
+        .rank-shell.display-mode .rank-card { border-radius:16px; }
+        .rank-shell.display-mode .rank-card:hover { transform:none; }
+        .rank-shell.display-mode .rank-row { padding:7px 10px; gap:9px; cursor:default; }
+        .rank-shell.display-mode .rank-row:hover { transform:none; background:inherit; }
+        .rank-shell.display-mode .rank-num { width:29px; height:29px; flex-basis:29px; border-radius:9px; }
+        .rank-shell.display-mode .champion-summary,
+        .rank-shell.display-mode .rank-last-activity,
+        .rank-shell.display-mode .rank-base,
+        .rank-shell.display-mode .rank-chevron { display:none!important; }
+        .rank-shell.display-mode .display-mode-toggle {
+          position:fixed;
+          right:12px;
+          bottom:10px;
+          z-index:85;
+          margin:0;
+          opacity:.28;
+          background:rgba(5,9,20,.76);
+          backdrop-filter:blur(10px);
+          transition:opacity .18s ease;
+        }
+        .rank-shell.display-mode .display-mode-toggle:hover { opacity:1; }
+
+        @media (min-width:1200px) {
+          .rank-shell.display-mode .rank-grid {
+            grid-template-columns:repeat(4,minmax(250px,1fr));
+            gap:12px;
+          }
+        }
+
+        /* Live result announcement: shown before Display Mode rank movement. */
+        .display-result-layer {
+          position:fixed;
+          top:clamp(22px,4vh,52px);
+          left:50%;
+          width:min(680px,calc(100vw - 38px));
+          z-index:120;
+          pointer-events:none;
+          opacity:0;
+          transform:translate(-50%,-18px) scale(.975);
+          transition:opacity .38s ease, transform .42s cubic-bezier(.2,.82,.2,1);
+        }
+        .display-result-layer.visible {
+          opacity:1;
+          transform:translate(-50%,0) scale(1);
+        }
+        .display-result-layer.hiding {
+          opacity:0;
+          transform:translate(-50%,-8px) scale(.99);
+        }
+        .display-result-card {
+          display:flex;
+          align-items:center;
+          gap:16px;
+          padding:17px 19px;
+          border-radius:19px;
+          border:1px solid rgba(255,255,255,.20);
+          background:linear-gradient(145deg,rgba(10,16,32,.96),rgba(9,13,27,.91));
+          box-shadow:0 24px 85px rgba(0,0,0,.52),inset 0 1px 0 rgba(255,255,255,.08);
+          backdrop-filter:blur(22px);
+          overflow:hidden;
+          position:relative;
+        }
+        .display-result-card::before {
+          content:"";
+          position:absolute;
+          inset:0 auto 0 0;
+          width:4px;
+          background:linear-gradient(180deg,#f5c542,#34d399);
+          box-shadow:0 0 24px rgba(52,211,153,.5);
+        }
+        .display-result-card.defense::before {
+          background:linear-gradient(180deg,#ffffff,#94a3b8);
+          box-shadow:0 0 24px rgba(226,232,240,.38);
+        }
+        .display-result-icon {
+          width:52px;
+          height:52px;
+          flex:0 0 52px;
+          display:grid;
+          place-items:center;
+          border-radius:15px;
+          background:rgba(245,197,66,.11);
+          border:1px solid rgba(245,197,66,.25);
+          color:#ffe792;
+          font-size:24px;
+          font-weight:950;
+        }
+        .display-result-card.defense .display-result-icon {
+          background:rgba(226,232,240,.09);
+          border-color:rgba(226,232,240,.22);
+          color:#f8fafc;
+        }
+        .display-result-copy { flex:1; min-width:0; }
+        .display-result-kicker {
+          font-size:10px;
+          font-weight:950;
+          letter-spacing:1.8px;
+          color:#86efac;
+          margin-bottom:4px;
+        }
+        .display-result-card.defense .display-result-kicker { color:#e2e8f0; }
+        .display-result-headline {
+          font-size:clamp(18px,2vw,25px);
+          line-height:1.18;
+          font-weight:720;
+          letter-spacing:-.25px;
+        }
+        .display-result-headline strong { font-weight:950; }
+        .display-result-meta {
+          margin-top:6px;
+          font-size:11px;
+          line-height:1.45;
+          color:rgba(255,255,255,.58);
+          font-weight:750;
+          letter-spacing:.45px;
+        }
+        .display-result-jump {
+          flex:0 0 auto;
+          padding:8px 11px;
+          border-radius:12px;
+          border:1px solid rgba(52,211,153,.28);
+          background:rgba(52,211,153,.10);
+          color:#86efac;
+          font-size:18px;
+          font-weight:950;
+        }
+        .display-result-multi {
+          display:grid;
+          gap:4px;
+          margin-top:4px;
+          font-size:12px;
+          color:rgba(255,255,255,.86);
+        }
+        .display-result-multi span { color:rgba(255,255,255,.50); font-size:10.5px; }
         @keyframes rankSlash { 0% { left:-70%; opacity:0; } 16% { opacity:.9; } 72% { opacity:.65; } 100% { left:125%; opacity:0; } }
         @keyframes takeoverImpact { 0% { box-shadow:0 0 0 0 rgba(52,211,153,0); } 18% { box-shadow:inset 0 0 0 1px rgba(245,197,66,.72),0 0 38px rgba(52,211,153,.28); } 58% { box-shadow:inset 0 0 0 1px rgba(52,211,153,.42),0 0 28px rgba(52,211,153,.18); } 100% { box-shadow:none; } }
         @keyframes defenseImpact { 0% { box-shadow:0 0 0 0 rgba(226,232,240,0); } 18% { box-shadow:inset 0 0 0 2px rgba(241,245,249,.92),0 0 38px rgba(226,232,240,.28); } 58% { box-shadow:inset 0 0 0 1px rgba(203,213,225,.55),0 0 28px rgba(226,232,240,.16); } 100% { box-shadow:none; } }
@@ -2375,7 +2711,6 @@ export default function App() {
         .search-input::placeholder { color:rgba(255,255,255,.48); }
         .search-input:focus { outline:none; border-color:rgba(245,197,66,.5)!important; box-shadow:0 0 0 3px rgba(245,197,66,.08); }
         @keyframes cardIn { from { opacity:0; transform:translateY(9px); } to { opacity:1; transform:none; } }
-        @keyframes recentGlow { 0% { box-shadow:inset 0 0 0 1px rgba(52,211,153,.55), 0 0 24px rgba(52,211,153,.14); } 100% { box-shadow:none; } }
         @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
         @keyframes drawerIn { from { opacity:0; transform:translateX(32px); } to { opacity:1; transform:none; } }
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.001ms!important; animation-iteration-count:1!important; transition-duration:.001ms!important; } }
@@ -2387,7 +2722,14 @@ export default function App() {
         }
       `}</style>
 
-      <div className="rank-shell theme-sydney">
+      {displayMode && (
+        <DisplayResultAnnouncement
+          announcement={displayAnnouncement}
+          visible={displayAnnouncementVisible}
+        />
+      )}
+
+      <div className={`rank-shell theme-sydney ${displayMode ? "display-mode" : ""}`}>
         <div className="topbar">
           {CONFIG.branding.logoUrl && (
             <img src={CONFIG.branding.logoUrl} alt="logo" className="brand-logo" />
@@ -2400,6 +2742,11 @@ export default function App() {
               </h1>
               <span style={{ ...pill, color: "#ffe792", borderColor: "rgba(245,197,66,.3)" }}>RANKINGS</span>
               <span style={{ ...pill, color: green, borderColor: "rgba(52,211,153,.28)", background: "rgba(52,211,153,.07)" }}>● LIVE · auto updates</span>
+              {displayMode && (
+                <span style={{ ...pill, color:"#dbeafe", borderColor:"rgba(147,197,253,.28)", background:"rgba(59,130,246,.08)", letterSpacing:.5 }}>
+                  DISPLAY MODE
+                </span>
+              )}
             </div>
             <div className="desktop-subtitle" style={{ marginTop: 3, opacity: 0.72, fontSize: 13 }}>
               Live Sydney Ranks • Check out competitor profiles 
@@ -2407,7 +2754,7 @@ export default function App() {
           </div>
 
           <button
-            className="control"
+            className="control non-display-ui"
             style={{ ...button, marginLeft: "auto", opacity: 0.72 }}
             onClick={() => setAdminPage(true)}
             title="Open data health diagnostics"
@@ -2430,7 +2777,7 @@ export default function App() {
         )}
 
         {/* Headline stats */}
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        <div className="non-display-ui" style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
           <div style={statCard}>
             <div style={{ fontSize: 11, opacity: 0.62, textTransform: "uppercase", letterSpacing: 1 }}>Active members</div>
             <div style={{ fontSize: 24, fontWeight: 900, marginTop: 2 }}>{activePlayers.length}</div>
@@ -2463,7 +2810,7 @@ export default function App() {
         </div>
 
         {/* Controls */}
-        <div style={{ ...glass, borderRadius: 16, padding: 10, marginBottom: 14, display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <div className="non-display-ui" style={{ ...glass, borderRadius: 16, padding: 10, marginBottom: 14, display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
           <input
             className="search-input"
             value={searchTerm}
@@ -2520,7 +2867,7 @@ export default function App() {
         </div>
 
         {/* Legend */}
-        <div style={{ marginBottom: 14, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", opacity: 0.92 }}>
+        <div className="non-display-ui" style={{ marginBottom: 14, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", opacity: 0.92 }}>
           <span style={pill}><span style={{ color: gold }}>★</span> takeover</span>
           <span style={pill}>🛡️ defense</span>
           <span style={pill}><span style={{ color: green }}>↑</span> moved up</span>
@@ -2529,7 +2876,7 @@ export default function App() {
         </div>
 
         {/* Recent activity */}
-        <section style={{ ...cardStyle, marginBottom: 18 }}>
+        <section className="non-display-ui" style={{ ...cardStyle, marginBottom: 18 }}>
           <button
             onClick={() => setShowActivity((v) => !v)}
             style={{
@@ -2611,13 +2958,14 @@ export default function App() {
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <div style={{ fontSize: 17, fontWeight: 900, letterSpacing: -0.2 }}>{prettyClassLabel(wc)}</div>
-                      <div style={{ fontSize: 10.5, opacity: 0.5, marginTop: 3 }}>
+                      <div className="rank-last-activity" style={{ fontSize: 10.5, opacity: 0.5, marginTop: 3 }}>
                         {lastActivity ? `Last activity ${formatDateAU(lastActivity)}` : "No recorded activity"}
                       </div>
                     </div>
 
                     {champion && (
                       <button
+                        className="champion-summary"
                         onClick={() => setSelectedPlayerId(champion.id)}
                         title={`Current #1: ${champion.name}`}
                         style={{ border: 0, background: "transparent", color: "white", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 9, textAlign: "right" }}
@@ -2648,7 +2996,8 @@ export default function App() {
                       replayFrames={searchLower ? [] : (initialReplayFrames?.[wc] || [])}
                       displayMode={displayMode}
                       limit={15}
-                      liveEvents={liveEvents.filter((event) => event.wc === wc)}
+                      liveEvents={releasedLiveEvents.filter((event) => event.wc === wc)}
+                      holdLiveUpdate={displayLivePending}
                       onSelect={setSelectedPlayerId}
                       getRowClass={(p) => {
                         const key = `${wc}:${p.id}`;
@@ -2682,9 +3031,9 @@ export default function App() {
                                   <span title={`Down ${Math.abs(movement)} from visible ranking matches in selected window`} style={{ color: red, fontSize: 11, fontWeight: 850 }}>↓ {Math.abs(movement)}</span>
                                 )}
                               </div>
-                              <div style={{ fontSize: 10.5, opacity: 0.52, marginTop: 2 }}>Base · {prettyBaseLabel(p.weight_class)}</div>
+                              <div className="rank-base" style={{ fontSize: 10.5, opacity: 0.52, marginTop: 2 }}>Base · {prettyBaseLabel(p.weight_class)}</div>
                             </div>
-                            <div style={{ opacity: 0.35, fontSize: 16 }}>›</div>
+                            <div className="rank-chevron" style={{ opacity: 0.35, fontSize: 16 }}>›</div>
                           </>
                         );
                       }}
